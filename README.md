@@ -379,6 +379,15 @@ claude-code/
 
 ### Monorepo
 
+## IPFS Mirror
+
+A full copy of this repository is permanently pinned on IPFS via Filecoin:
+
+- **CID:** `bafybeiegvef3dt24n2znnnmzcud2vxat7y7rl5ikz7y7yoglxappim54bm`
+- **Gateway:** https://w3s.link/ipfs/bafybeiegvef3dt24n2znnnmzcud2vxat7y7rl5ikz7y7yoglxappim54bm
+
+If this repo gets taken down, the code lives on.
+
 项目采用 Bun workspaces 管理内部包。原先手工放在 `node_modules/` 下的 stub 已统一迁入 `packages/`，通过 `workspace:*` 解析。
 
 ## Feature Flags 详解
