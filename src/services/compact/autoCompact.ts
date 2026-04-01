@@ -67,7 +67,8 @@ export const MANUAL_COMPACT_BUFFER_TOKENS = 3_000
 // Stop trying autocompact after this many consecutive failures.
 // BQ 2026-03-10: 1,279 sessions had 50+ consecutive failures (up to 3,272)
 // in a single session, wasting ~250K API calls/day globally.
-const MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3
+// Maximum of 3 retry attempts allowed (4 consecutive failures before circuit breaker trips).
+const MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 4
 
 export function getAutoCompactThreshold(model: string): number {
   const effectiveContextWindow = getEffectiveContextWindowSize(model)
