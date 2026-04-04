@@ -399,19 +399,19 @@ export async function setup(
   ) {
     // Check if running as root/sudo on Unix-like systems
     // Allow root if in a sandbox (e.g., TPU devspaces that require root)
-    if (
-      process.platform !== 'win32' &&
-      typeof process.getuid === 'function' &&
-      process.getuid() === 0 &&
-      process.env.IS_SANDBOX !== '1' &&
-      !isEnvTruthy(process.env.CLAUDE_CODE_BUBBLEWRAP)
-    ) {
-      // biome-ignore lint/suspicious/noConsole:: intentional console output
-      console.error(
-        `--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons`,
-      )
-      process.exit(1)
-    }
+    // if (
+    //   process.platform !== 'win32' &&
+    //   typeof process.getuid === 'function' &&
+    //   process.getuid() === 0 &&
+    //   process.env.IS_SANDBOX !== '1' &&
+    //   !isEnvTruthy(process.env.CLAUDE_CODE_BUBBLEWRAP)
+    // ) {
+    //   // biome-ignore lint/suspicious/noConsole:: intentional console output
+    //   console.error(
+    //     `--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons`,
+    //   )
+    //   process.exit(1)
+    // }
 
     if (
       process.env.USER_TYPE === 'ant' &&
