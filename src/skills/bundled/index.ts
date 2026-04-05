@@ -11,6 +11,7 @@ import { registerSimplifySkill } from './simplify.js'
 import { registerSkillifySkill } from './skillify.js'
 import { registerStuckSkill } from './stuck.js'
 import { registerUpdateConfigSkill } from './updateConfig.js'
+import { registerClaudeToolAddSkill } from './claude-tool-add-skill.js'
 import { registerVerifySkill } from './verify.js'
 
 /**
@@ -24,6 +25,7 @@ import { registerVerifySkill } from './verify.js'
  */
 export function initBundledSkills(): void {
   registerUpdateConfigSkill()
+  registerClaudeToolAddSkill()
   registerKeybindingsSkill()
   registerVerifySkill()
   registerDebugSkill()
