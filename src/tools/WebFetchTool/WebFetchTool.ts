@@ -1,7 +1,6 @@
 import { z } from 'zod/v4'
 import { buildTool, type ToolDef } from '../../Tool.js'
 import type { PermissionUpdate } from '../../types/permissions.js'
-import { formatFileSize } from '../../utils/format.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import type { PermissionDecision } from '../../utils/permissions/PermissionResult.js'
 import { getRuleByContentsForTool } from '../../utils/permissions/permissions.js'
@@ -15,16 +14,60 @@ import {
 } from './UI.js'
 import {
   applyPromptToMarkdown,
-  type FetchedContent,
-  getURLMarkdownContent,
+  fetchContent,
+  fetchViaCDP,
+  isCDPAvailable,
+  type FetchMode,
+  type OutputFormat,
   isPreapprovedUrl,
-  MAX_MARKDOWN_LENGTH,
 } from './utils.js'
 
 const inputSchema = lazySchema(() =>
   z.strictObject({
     url: z.string().url().describe('The URL to fetch content from'),
     prompt: z.string().describe('The prompt to run on the fetched content'),
+    mode: z
+      .enum(['auto', 'web', 'twitter', 'wechat'])
+      .optional()
+      .describe(
+        'Fetch mode: auto (auto-detect), web (generic webpage), twitter (X/Twitter), wechat (WeChat articles). Defaults to auto.',
+      ),
+    format: z
+      .enum(['markdown', 'json', 'text'])
+      .optional()
+      .describe(
+        'Output format: markdown (default), json (structured data), text (human-readable). For Twitter/X content, json returns raw API response.',
+      ),
+    skipJina: z
+      .boolean()
+      .optional()
+      .describe(
+        'Skip Jina Reader and use direct fetching. Useful when Jina fails for certain sites.',
+      ),
+    pretty: z
+      .boolean()
+      .optional()
+      .describe(
+        'Pretty-print JSON output (only applies when format is json).',
+      ),
+    textOnly: z
+      .boolean()
+      .optional()
+      .describe(
+        'Return human-readable text instead of markdown (Twitter/X only).',
+      ),
+    wechatApiUrl: z
+      .string()
+      .optional()
+      .describe(
+        'WeChat article exporter API URL (e.g., http://localhost:3000). If set, uses this service for WeChat articles.',
+      ),
+    useCDP: z
+      .boolean()
+      .optional()
+      .describe(
+        'Use Chrome DevTools Protocol (CDP) to fetch content. Required for JavaScript-rendered pages like Xiaohongshu (小红书), Single-page apps, and sites with anti-bot protection. Auto-fallback to CDP when static fetch returns insufficient content.',
+      ),
   }),
 )
 type InputSchema = ReturnType<typeof inputSchema>
@@ -206,68 +249,111 @@ ${DESCRIPTION}`
   renderToolUseProgressMessage,
   renderToolResultMessage,
   async call(
-    { url, prompt },
-    { abortController, options: { isNonInteractiveSession } },
+    {
+      url,
+      prompt,
+      mode = 'auto',
+      format = 'markdown',
+      skipJina,
+      pretty,
+      textOnly,
+      wechatApiUrl,
+      useCDP,
+    },
+    context,
   ) {
+    const { abortController, options: { isNonInteractiveSession } } = context
     const start = Date.now()
 
-    const response = await getURLMarkdownContent(url, abortController)
+    let fetchResult: { content: string; source: string; code: number; bytes: number }
+    let usedCDP = false
 
-    // Check if we got a redirect to a different host
-    if ('type' in response && response.type === 'redirect') {
-      const statusText =
-        response.statusCode === 301
-          ? 'Moved Permanently'
-          : response.statusCode === 308
-            ? 'Permanent Redirect'
-            : response.statusCode === 307
-              ? 'Temporary Redirect'
-              : 'Found'
+    // Determine if we should use CDP
+    const shouldUseCDP = useCDP === true
+    const isAntiBotSite = /xiaohongshu\.com|xhslink\.com|weibo\.com|douyin\.com|tiktok\.com/i.test(url)
 
-      const message = `REDIRECT DETECTED: The URL redirects to a different host.
-
-Original URL: ${response.originalUrl}
-Redirect URL: ${response.redirectUrl}
-Status: ${response.statusCode} ${statusText}
-
-To complete your request, I need to fetch content from the redirected URL. Please use WebFetch again with these parameters:
-- url: "${response.redirectUrl}"
-- prompt: "${prompt}"`
-
-      const output: Output = {
-        bytes: Buffer.byteLength(message),
-        code: response.statusCode,
-        codeText: statusText,
-        result: message,
-        durationMs: Date.now() - start,
-        url,
-      }
-
-      return {
-        data: output,
+    if (shouldUseCDP || isAntiBotSite) {
+      // Try CDP first if explicitly requested or site is known anti-bot
+      const cdpAvailable = await isCDPAvailable()
+      if (cdpAvailable) {
+        try {
+          fetchResult = await fetchViaCDP(url, abortController.signal, {
+            scrollToBottom: true,
+          })
+          usedCDP = true
+        } catch (err) {
+          if (shouldUseCDP) {
+            // User explicitly requested CDP but it failed
+            throw err
+          }
+          // Otherwise fall through to regular fetch
+        }
+      } else if (shouldUseCDP) {
+        // Get more detailed error by trying to check CDP availability
+        const cdpCheck = await isCDPAvailable()
+        if (!cdpCheck) {
+          throw new Error(
+            'CDP mode requested but CDP is not available.\n' +
+            'Current Chrome remote-debugging-port: 37741 (detected from DevToolsActivePort)\n' +
+            'Please ensure Chrome is running with --remote-debugging-port=9222',
+          )
+        }
       }
     }
 
-    const {
-      content,
-      bytes,
-      code,
-      codeText,
-      contentType,
-      persistedPath,
-      persistedSize,
-    } = response as FetchedContent
+    // Use regular fetch if CDP wasn't used or failed
+    if (!fetchResult!) {
+      fetchResult = await fetchContent(url, abortController.signal, {
+        mode: mode as FetchMode,
+        format: format as OutputFormat,
+        skipJina,
+        pretty,
+        textOnly,
+        wechatApiUrl,
+      })
 
+      // Auto-fallback to CDP if content seems insufficient (likely bot protection)
+      if (!useCDP && !usedCDP) {
+        const contentLower = fetchResult.content.toLowerCase()
+        const isInsufficient =
+          fetchResult.content.length < 500 ||
+          contentLower.includes('请开启javascript') ||
+          contentLower.includes('please enable javascript') ||
+          contentLower.includes('需要登录') ||
+          contentLower.includes('请登录') ||
+          contentLower.includes('verification') ||
+          contentLower.includes('captcha') ||
+          (contentLower.includes('footer') && contentLower.includes('privacy') && fetchResult.content.length < 1000)
+
+        if (isInsufficient) {
+          const cdpAvailable = await isCDPAvailable()
+          if (cdpAvailable) {
+            try {
+              const cdpResult = await fetchViaCDP(url, abortController.signal, {
+                scrollToBottom: true,
+              })
+              // Use CDP result if it's significantly better
+              if (cdpResult.content.length > fetchResult.content.length * 1.5) {
+                fetchResult = cdpResult
+                usedCDP = true
+              }
+            } catch {
+              // CDP fallback failed, keep original result
+            }
+          }
+        }
+      }
+    }
+
+    const { content, source, code } = fetchResult
     const isPreapproved = isPreapprovedUrl(url)
 
+    // For JSON format or when user explicitly wants raw content, skip prompt processing
     let result: string
-    if (
-      isPreapproved &&
-      contentType.includes('text/markdown') &&
-      content.length < MAX_MARKDOWN_LENGTH
-    ) {
+    if (format === 'json' || (prompt === 'raw' || prompt === '')) {
       result = content
     } else {
+      // Apply user's prompt to the fetched content
       result = await applyPromptToMarkdown(
         prompt,
         content,
@@ -277,17 +363,10 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
       )
     }
 
-    // Binary content (PDFs, etc.) was additionally saved to disk with a
-    // mime-derived extension. Note it so Claude can inspect the raw file
-    // if the Haiku summary above isn't enough.
-    if (persistedPath) {
-      result += `\n\n[Binary content (${contentType}, ${formatFileSize(persistedSize ?? bytes)}) also saved to ${persistedPath}]`
-    }
-
     const output: Output = {
-      bytes,
+      bytes: fetchResult.bytes,
       code,
-      codeText,
+      codeText: usedCDP ? 'CDP' : source,
       result,
       durationMs: Date.now() - start,
       url,
