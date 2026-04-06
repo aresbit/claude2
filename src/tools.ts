@@ -17,6 +17,8 @@ import { MemoryTool } from './tools/MemoryTool/MemoryTool.js'
 import { Paper2CodeTool } from './tools/Paper2CodeTool/Paper2CodeTool.js'
 import { WikiTool } from './tools/WikiTool/WikiTool.js'
 import { KimiTool } from './tools/KimiTool/KimiTool.js'
+import { LlytdlpTool } from './tools/LlytdlpTool/LlytdlpTool.js'
+import { LlmpegTool } from './tools/LlmpegTool/LlmpegTool.js'
 // Dead code elimination: conditional import for ant-only tools
 /* eslint-disable custom-rules/no-process-env-top-level, @typescript-eslint/no-require-imports */
 const REPLTool =
@@ -223,6 +225,8 @@ export function getAllBaseTools(): Tools {
     Paper2CodeTool,
     WikiTool,
     KimiTool,
+    LlytdlpTool,
+    LlmpegTool,
     EnterPlanModeTool,
     ...(process.env.USER_TYPE === 'ant' ? [ConfigTool] : []),
     ...(process.env.USER_TYPE === 'ant' ? [TungstenTool] : []),
