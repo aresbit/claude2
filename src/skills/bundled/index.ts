@@ -13,6 +13,7 @@ import { registerStuckSkill } from './stuck.js'
 import { registerUpdateConfigSkill } from './updateConfig.js'
 import { registerClaudeToolAddSkill } from './claude-tool-add-skill.js'
 import { registerVerifySkill } from './verify.js'
+import { registerWikitoolSkill } from './wikitool.js'
 
 /**
  * Initialize all bundled skills.
@@ -36,6 +37,7 @@ export function initBundledSkills(): void {
   registerSimplifySkill()
   registerBatchSkill()
   registerStuckSkill()
+  registerWikitoolSkill()
   if (feature('KAIROS') || feature('KAIROS_DREAM')) {
     /* eslint-disable @typescript-eslint/no-require-imports */
     const { registerDreamSkill } = require('./dream.js')
