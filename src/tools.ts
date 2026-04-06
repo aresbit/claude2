@@ -20,6 +20,7 @@ import { KimiTool } from './tools/KimiTool/KimiTool.js'
 import { LlytdlpTool } from './tools/LlytdlpTool/LlytdlpTool.js'
 import { LlmpegTool } from './tools/LlmpegTool/LlmpegTool.js'
 import { GeminiSubtitleTool } from './tools/GeminiSubtitleTool/GeminiSubtitleTool.js'
+import { RedoTool } from './tools/RedoTool/RedoTool.js'
 // Dead code elimination: conditional import for ant-only tools
 /* eslint-disable custom-rules/no-process-env-top-level, @typescript-eslint/no-require-imports */
 const REPLTool =
@@ -229,6 +230,7 @@ export function getAllBaseTools(): Tools {
     LlytdlpTool,
     LlmpegTool,
     GeminiSubtitleTool,
+    RedoTool,
     EnterPlanModeTool,
     ...(process.env.USER_TYPE === 'ant' ? [ConfigTool] : []),
     ...(process.env.USER_TYPE === 'ant' ? [TungstenTool] : []),
