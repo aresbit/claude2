@@ -1,22 +1,47 @@
+import { appendFile, mkdir, writeFile } from 'fs/promises'
+import { homedir } from 'os'
+import { join } from 'path'
 import { z } from 'zod/v4'
 import { buildTool, type ToolDef } from '../../Tool.js'
+import { MEMORY_TYPES, type MemoryType } from '../../memdir/memoryTypes.js'
+import { MemoryStore } from '../MemoryTool/MemoryStore.js'
 import { lazySchema } from '../../utils/lazySchema.js'
-import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
-import type { AssistantMessage } from '../../types/message.js'
-import type { ToolCallProgress } from '../../Tool.js'
+import { zodToJsonSchema } from '../../utils/zodToJsonSchema.js'
+import { fetchContent } from '../WebFetchTool/utils.js'
+import {
+  renderToolResultMessage,
+  renderToolUseMessage,
+  renderToolUseProgressMessage,
+} from './UI.js'
+import { DESCRIPTION } from './prompt.js'
+
+const WIKI_TOOL_NAME = 'wikitool'
+
+const WIKI_CATEGORIES = ['article', 'paper', 'note', 'image'] as const
 
 const inputSchema = lazySchema(() =>
   z.strictObject({
     url: z.string().url().describe('The URL to fetch content from'),
     title: z.string().describe('Title for the saved content'),
-    description: z.string().describe('Brief description of the content').optional(),
-    category: z.enum(['article', 'paper', 'note', 'image']).default('article').describe('Content category'),
+    description: z.string().optional().describe('Brief description of the content'),
+    category: z
+      .enum(WIKI_CATEGORIES)
+      .default('article')
+      .describe('Content category'),
     tags: z.array(z.string()).optional().describe('Tags for categorization'),
-    saveMemory: z.boolean().default(true).describe('Whether to save as memory file'),
-    memoryType: z.enum(['user', 'feedback', 'project', 'reference']).default('project').describe('Type of memory to save').optional(),
+    saveMemory: z
+      .boolean()
+      .default(true)
+      .describe('Whether to save a companion memory file'),
+    memoryType: z
+      .enum(MEMORY_TYPES)
+      .default('project')
+      .describe('Type of memory to save when saveMemory is true'),
   }),
 )
+
 type InputSchema = ReturnType<typeof inputSchema>
+type Input = z.infer<InputSchema>
 
 const outputSchema = lazySchema(() =>
   z.object({
@@ -28,161 +53,75 @@ const outputSchema = lazySchema(() =>
     message: z.string().describe('Status message'),
   }),
 )
-type OutputSchema = ReturnType<typeof outputSchema>
 
+type OutputSchema = ReturnType<typeof outputSchema>
 export type Output = z.infer<OutputSchema>
 
 function sanitizeFilename(title: string): string {
-  return title
-    .replace(/[^\w\u4e00-\u9fa5\s-]/g, '') // Remove special chars, keep Chinese characters
-    .replace(/\s+/g, '_') // Replace spaces with underscores
-    .replace(/_+/g, '_') // Replace multiple underscores with single
+  const sanitized = title
+    .replace(/[^\w\u4e00-\u9fa5\s-]/g, '')
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_')
     .trim()
+
+  return sanitized || 'untitled'
 }
 
-function getCategoryDirectory(category: string): string {
-  const directories: Record<string, string> = {
-    article: 'articles',
-    paper: 'papers',
-    note: 'notes',
-    image: 'images',
+function getCategoryDirectory(category: Input['category']): string {
+  switch (category) {
+    case 'paper':
+      return 'papers'
+    case 'note':
+      return 'notes'
+    case 'image':
+      return 'images'
+    case 'article':
+    default:
+      return 'articles'
   }
-  return directories[category] || 'articles'
 }
 
 function getWikiBasePath(): string {
-  // Allow override via environment variable
-  if (process.env.WIKI_BASE_PATH) {
-    return process.env.WIKI_BASE_PATH
-  }
-  const home = process.env.HOME || '/Users/mac'
-  return `${home}/yyswiki`
+  return process.env.WIKI_BASE_PATH || join(homedir(), 'yyswiki')
 }
 
-export const WikiTool = buildTool({
-  name: 'wikitool',
-  searchHint: 'fetch and save content to wiki knowledge base',
-  maxResultSizeChars: 100_000,
-  shouldDefer: false,
-  isMcp: false,
-  async description(input, options) {
-    const basePath = getWikiBasePath()
-    const envNote = process.env.WIKI_BASE_PATH ? ' (custom path via WIKI_BASE_PATH env var)' : ' (default path, can be customized via WIKI_BASE_PATH env var)'
-    return `Fetch web content and save it to the personal wiki knowledge base at ${basePath}/raw_sources/. Can also save as memory file.${envNote}`
-  },
-  get inputSchema(): InputSchema {
-    return inputSchema()
-  },
-  get outputSchema(): OutputSchema {
-    return outputSchema()
-  },
-  async prompt(options) {
-    const basePath = getWikiBasePath()
-    const envNote = process.env.WIKI_BASE_PATH ? ' (custom path via WIKI_BASE_PATH env var)' : ' (default path, can be customized via WIKI_BASE_PATH env var)'
-    return `Fetch web content and save it to the personal wiki knowledge base at ${basePath}/raw_sources/. Can also save as memory file.${envNote}`
-  },
-  isConcurrencySafe() {
-    return false
-  },
-  isReadOnly() {
-    return false
-  },
-  async call(input, context, canUseTool, parentMessage, onProgress) {
-    console.error('WikiTool called with input:', input);
-    try {
-      // Step 1: Fetch content using WebFetchTool
-      onProgress?.({
-        status: 'running',
-        message: `Fetching content from ${input.url}`,
-      })
+function formatTags(tags: string[] | undefined): string {
+  return tags && tags.length > 0 ? tags.join(', ') : 'none'
+}
 
-      const fetchResult = await canUseTool({
-        name: 'WebFetch',
-        input: {
-          url: input.url,
-          prompt: `Extract the main content from this page and convert it to clean markdown format. Include title: ${input.title}`,
-          mode: 'auto',
-          format: 'markdown',
-        },
-        parentMessage,
-      })
+function buildMarkdownContent(
+  input: Input,
+  fetchedContent: string,
+  fetchedAt: string,
+): string {
+  const header = [
+    `# ${input.title}`,
+    '',
+    input.description ? `> ${input.description}` : '',
+    input.description ? '' : '',
+    `**Source URL**: ${input.url}`,
+    `**Fetched**: ${fetchedAt}`,
+    `**Category**: ${input.category}`,
+    input.tags && input.tags.length > 0 ? `**Tags**: ${input.tags.join(', ')}` : '',
+    '',
+    '---',
+    '',
+  ].filter(Boolean)
 
-      if (!fetchResult.success) {
-        throw new Error(`Failed to fetch content: ${fetchResult.error || 'Unknown error'}`)
-      }
+  return `${header.join('\n')}${fetchedContent.endsWith('\n') ? '' : '\n'}${fetchedContent}`
+}
 
-      const content = fetchResult.result.result
-
-      // Step 2: Save to raw_sources directory
-      onProgress?.({
-        status: 'running',
-        message: `Saving content to wiki knowledge base`,
-      })
-
-      const sanitizedTitle = sanitizeFilename(input.title)
-      const categoryDir = getCategoryDirectory(input.category)
-      const filename = `${sanitizedTitle}.md`
-      const wikiBasePath = getWikiBasePath()
-      const filePath = `${wikiBasePath}/raw_sources/${categoryDir}/${filename}`
-
-      // Create directory if it doesn't exist
-      const mkdirResult = await canUseTool({
-        name: 'Bash',
-        input: {
-          command: `mkdir -p "${wikiBasePath}/raw_sources/${categoryDir}"`,
-        },
-        parentMessage,
-      })
-
-      if (!mkdirResult.success) {
-        throw new Error(`Failed to create directory: ${mkdirResult.error || 'Unknown error'}`)
-      }
-
-      // Create markdown file with metadata
-      const markdownContent = `# ${input.title}
-
-${input.description ? `> ${input.description}\n\n` : ''}**Source URL**: ${input.url}
-**Fetched**: ${new Date().toISOString().split('T')[0]}
-**Category**: ${input.category}
-${input.tags && input.tags.length > 0 ? `**Tags**: ${input.tags.join(', ')}\n\n` : '\n'}
-
----
-
-${content}
-`
-
-      const writeResult = await canUseTool({
-        name: 'Write',
-        input: {
-          file_path: filePath,
-          content: markdownContent,
-        },
-        parentMessage,
-      })
-
-      if (!writeResult.success) {
-        throw new Error(`Failed to write file: ${writeResult.error || 'Unknown error'}`)
-      }
-
-      let memoryFilePath = ''
-
-      // Step 3: Save as memory file if requested
-      if (input.saveMemory) {
-        onProgress?.({
-          status: 'running',
-          message: `Saving as memory file`,
-        })
-
-        const memoryType = input.memoryType || 'project'
-        const memoryName = `wiki_${sanitizedTitle}`
-        const memoryDescription = `Wiki content: ${input.title} from ${input.url}`
-
-        const memoryContent = `## Wiki Content: ${input.title}
+function buildMemoryContent(
+  input: Input,
+  sourceFile: string,
+  savedAt: string,
+): string {
+  return `## Wiki Content: ${input.title}
 
 **URL**: ${input.url}
 **Category**: ${input.category}
-**Saved**: ${new Date().toISOString()}
-**Source File**: ${filePath}
+**Saved**: ${savedAt}
+**Source File**: ${sourceFile}
 
 ### Summary
 ${input.description || 'Content saved from web source'}
@@ -190,98 +129,145 @@ ${input.description || 'Content saved from web source'}
 ### Key Points
 - Source: ${input.url}
 - Type: ${input.category}
-- Tags: ${input.tags ? input.tags.join(', ') : 'none'}
+- Tags: ${formatTags(input.tags)}
 
 ### Why:
-This content was fetched and saved as part of building a personal knowledge base. It represents information that may be useful for future reference, research, or analysis.
+This content was fetched and saved as part of building a personal knowledge base.
 
 ### How to apply:
-Refer to this memory when working with related topics. The source file contains the full content in markdown format.
+Use the source file for the full markdown content and this memory as a durable index entry.
 `
+}
 
-        const memoryResult = await canUseTool({
-          name: 'MemoryTool',
-          input: {
-            action: 'save',
-            type: memoryType,
-            name: memoryName,
-            description: memoryDescription,
-            content: memoryContent,
-            tags: ['wiki', input.category, ...(input.tags || [])],
-          },
-          parentMessage,
-        })
+function createAbortController(parentSignal: AbortSignal): AbortController {
+  const controller = new AbortController()
+  if (parentSignal.aborted) {
+    controller.abort()
+    return controller
+  }
 
-        if (!memoryResult.success) {
-          console.warn(`Warning: Failed to save memory: ${memoryResult.error || 'Unknown error'}`)
-          // Continue even if memory save fails
-        } else {
-          memoryFilePath = memoryResult.result.memory?.filePath || ''
-        }
-      }
+  parentSignal.addEventListener('abort', () => controller.abort(), { once: true })
+  return controller
+}
 
-      // Step 4: Update wiki index or log if needed
-      onProgress?.({
-        status: 'running',
-        message: `Updating wiki logs`,
+export const WikiTool = buildTool({
+  name: WIKI_TOOL_NAME,
+  searchHint: 'fetch and save content to wiki knowledge base',
+  maxResultSizeChars: 100_000,
+  async description() {
+    return DESCRIPTION
+  },
+  async prompt() {
+    return DESCRIPTION
+  },
+  get inputSchema(): InputSchema {
+    return inputSchema()
+  },
+  get inputJSONSchema() {
+    const schema = zodToJsonSchema(inputSchema())
+    schema.type = 'object'
+    return schema
+  },
+  get outputSchema(): OutputSchema {
+    return outputSchema()
+  },
+  userFacingName() {
+    return 'WikiTool'
+  },
+  shouldDefer: false,
+  isConcurrencySafe() {
+    return false
+  },
+  isReadOnly() {
+    return false
+  },
+  toAutoClassifierInput(input) {
+    return `${input.url} -> ${input.title}`
+  },
+  renderToolUseMessage,
+  renderToolUseProgressMessage,
+  renderToolResultMessage,
+  async call(input, context) {
+    const abortController = createAbortController(context.abortController.signal)
+    const now = new Date()
+    const isoTimestamp = now.toISOString()
+    const isoDate = isoTimestamp.split('T')[0] || isoTimestamp
+    const wikiBasePath = getWikiBasePath()
+    const categoryDir = getCategoryDirectory(input.category)
+    const sourceDir = join(wikiBasePath, 'raw_sources', categoryDir)
+    const filename = `${sanitizeFilename(input.title)}.md`
+    const sourceFile = join(sourceDir, filename)
+
+    try {
+      const fetched = await fetchContent(input.url, abortController.signal, {
+        mode: 'auto',
+        format: 'markdown',
       })
 
-      // Add entry to wiki log
-      const logEntry = `## [${new Date().toISOString().split('T')[0]}] ingest | ${input.title}
+      await mkdir(sourceDir, { recursive: true })
+      await writeFile(
+        sourceFile,
+        buildMarkdownContent(input, fetched.content, isoDate),
+        'utf-8',
+      )
+
+      let memoryFile: string | undefined
+      if (input.saveMemory) {
+        const memoryStore = new MemoryStore()
+        const memory = await memoryStore.saveMemory(
+          input.memoryType as MemoryType,
+          `wiki_${sanitizeFilename(input.title)}`,
+          `Wiki content: ${input.title} from ${input.url}`,
+          buildMemoryContent(input, sourceFile, isoTimestamp),
+          ['wiki', input.category, ...(input.tags || [])],
+        )
+        memoryFile = memory.filePath
+      }
+
+      const logDir = join(wikiBasePath, 'wiki')
+      await mkdir(logDir, { recursive: true })
+      await appendFile(
+        join(logDir, 'log.md'),
+        `## [${isoDate}] ingest | ${input.title}
 - Source: ${input.url}
 - Category: ${input.category}
 - File: ${filename}
-- Memory: ${input.saveMemory ? 'saved' : 'not saved'}`
+- Memory: ${input.saveMemory ? 'saved' : 'not saved'}
 
-      // Ensure wiki directory exists
-      const mkdirLogResult = await canUseTool({
-        name: 'Bash',
-        input: {
-          command: `mkdir -p "${wikiBasePath}/wiki"`,
-        },
-        parentMessage,
-      })
-
-      if (!mkdirLogResult.success) {
-        console.warn(`Warning: Failed to create wiki directory: ${mkdirLogResult.error || 'Unknown error'}`)
-      }
-
-      // Append to log file using bash (filewrite doesn't support append)
-      const logResult = await canUseTool({
-        name: 'Bash',
-        input: {
-          command: `echo '${logEntry.replace(/'/g, "'\"'\"'")}' >> "${wikiBasePath}/wiki/log.md"`,
-        },
-        parentMessage,
-      })
-
-      // Log update is optional, don't fail if it doesn't work
-      if (!logResult.success) {
-        console.warn(`Warning: Failed to update log: ${logResult.error || 'Unknown error'}`)
-      }
-
-      onProgress?.({
-        status: 'completed',
-        message: `Successfully saved content to wiki`,
-      })
+`,
+        'utf-8',
+      )
 
       return {
-        success: true,
-        sourceFile: filePath,
-        memoryFile: memoryFilePath,
-        url: input.url,
-        title: input.title,
-        message: `Successfully saved "${input.title}" to wiki knowledge base at ${filePath}`,
+        data: {
+          success: true,
+          sourceFile,
+          memoryFile,
+          url: input.url,
+          title: input.title,
+          message: `Saved "${input.title}" to ${sourceFile}`,
+        },
       }
-
     } catch (error) {
       return {
-        success: false,
-        sourceFile: '',
-        url: input.url,
-        title: input.title,
-        message: `Failed to save content to wiki: ${error instanceof Error ? error.message : String(error)}`,
+        data: {
+          success: false,
+          sourceFile: '',
+          url: input.url,
+          title: input.title,
+          message: error instanceof Error ? error.message : String(error),
+        },
       }
     }
   },
-})
+  mapToolResultToToolResultBlockParam(content, toolUseID) {
+    const output = content as Output
+    return {
+      tool_use_id: toolUseID,
+      type: 'tool_result',
+      content: output.success
+        ? `Saved "${output.title}" to wiki`
+        : `Failed to save "${output.title}" to wiki: ${output.message}`,
+    }
+  },
+} satisfies ToolDef<InputSchema, Output>)
