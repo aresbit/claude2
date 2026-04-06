@@ -1,61 +1,243 @@
+import { access, mkdir, readFile } from 'fs/promises'
+import { constants as fsConstants } from 'fs'
+import { join, resolve } from 'path'
 import { z } from 'zod/v4'
 import { buildTool, type ToolDef } from '../../Tool.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { zodToJsonSchema } from '../../utils/zodToJsonSchema.js'
-import { DESCRIPTION, getPrompt } from './prompt'
+import { DESCRIPTION, getPrompt, PAPER2CODE_TOOL_NAME } from './prompt.js'
 
 const inputSchema = lazySchema(() =>
   z.strictObject({
-    arxivId: z.string().describe('arXiv ID or URL (e.g., "1706.03762" or "https://arxiv.org/abs/1706.03762")'),
-    framework: z.enum(['pytorch', 'jax', 'tensorflow', 'none']).optional().default('pytorch').describe('Framework for implementation'),
-    mode: z.enum(['minimal', 'full', 'educational']).optional().default('minimal').describe('Generation mode'),
-    outputDir: z.string().optional().describe('Output directory (default: ./paper2code_output/{arxiv_id}/)'),
-    installIfMissing: z.boolean().optional().default(false).describe('Install paper2code skill if missing'),
+    arxivId: z
+      .string()
+      .describe(
+        'arXiv ID or URL (e.g., "1706.03762" or "https://arxiv.org/abs/1706.03762")',
+      ),
+    framework: z
+      .enum(['pytorch', 'jax', 'tensorflow', 'none'])
+      .optional()
+      .default('pytorch')
+      .describe('Framework hint recorded in the output metadata'),
+    mode: z
+      .enum(['minimal', 'full', 'educational'])
+      .optional()
+      .default('minimal')
+      .describe('Generation mode hint recorded in the output metadata'),
+    outputDir: z
+      .string()
+      .optional()
+      .describe('Output directory (default: ./paper2code_output/{arxiv_id}/)'),
+    installIfMissing: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe('Deprecated compatibility flag. No-op in local-script mode.'),
   }),
 )
 type InputSchema = ReturnType<typeof inputSchema>
+type Input = z.infer<InputSchema>
 
 const outputSchema = lazySchema(() =>
   z.object({
     success: z.boolean().describe('Whether the operation succeeded'),
     message: z.string().describe('Status message'),
-    outputDir: z.string().optional().describe('Output directory containing generated files'),
+    outputDir: z
+      .string()
+      .optional()
+      .describe('Output directory containing generated files'),
     files: z.array(z.string()).optional().describe('Generated files'),
     paperTitle: z.string().optional().describe('Paper title'),
     paperAuthors: z.array(z.string()).optional().describe('Paper authors'),
-    installed: z.boolean().optional().describe('Whether paper2code was installed'),
-    skillAvailable: z.boolean().optional().describe('Whether paper2code skill is available'),
+    installed: z
+      .boolean()
+      .optional()
+      .describe('Compatibility field; always false in local-script mode'),
+    skillAvailable: z
+      .boolean()
+      .optional()
+      .describe('Compatibility field; always true in local-script mode'),
   }),
 )
 type OutputSchema = ReturnType<typeof outputSchema>
 
 export type Output = z.infer<OutputSchema>
 
+type PaperMetadata = {
+  title?: string
+  authors?: string[]
+}
+
+function normalizeArxivId(input: string): string {
+  return input
+    .trim()
+    .replace(/^https?:\/\/arxiv\.org\/abs\//, '')
+    .replace(/^https?:\/\/arxiv\.org\/pdf\//, '')
+    .replace(/\.pdf$/, '')
+    .replace(/\/$/, '')
+}
+
+function defaultOutputDir(arxivId: string): string {
+  return resolve(
+    process.cwd(),
+    'paper2code_output',
+    arxivId.replace(/[^a-zA-Z0-9._-]/g, '_'),
+  )
+}
+
+function getSkillRoot(): string {
+  return resolve(
+    process.cwd(),
+    'src',
+    'tools',
+    'Paper2CodeTool',
+    'skill',
+    'paper2code',
+  )
+}
+
+function getScripts(): { fetch: string; extract: string } {
+  const root = getSkillRoot()
+  return {
+    fetch: join(root, 'scripts', 'fetch_paper.py'),
+    extract: join(root, 'scripts', 'extract_structure.py'),
+  }
+}
+
+async function ensureFileExists(path: string): Promise<void> {
+  await access(path, fsConstants.F_OK)
+}
+
+async function runCommand(
+  command: string[],
+  cwd: string,
+  signal: AbortSignal,
+): Promise<{ stdout: string; stderr: string }> {
+  const proc = Bun.spawn(command, {
+    cwd,
+    stdout: 'pipe',
+    stderr: 'pipe',
+    signal,
+  })
+
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ])
+
+  if (exitCode !== 0) {
+    throw new Error(stderr.trim() || stdout.trim() || `Command failed: ${command.join(' ')}`)
+  }
+
+  return { stdout, stderr }
+}
+
+async function ensurePythonModule(
+  python: string,
+  moduleName: string,
+  signal: AbortSignal,
+): Promise<void> {
+  try {
+    await runCommand(
+      [python, '-c', `import ${moduleName}`],
+      process.cwd(),
+      signal,
+    )
+  } catch {
+    await runCommand(
+      [python, '-m', 'pip', 'install', moduleName],
+      process.cwd(),
+      signal,
+    )
+  }
+}
+
+function getVenvPython(venvDir: string): string {
+  return process.platform === 'win32'
+    ? join(venvDir, 'Scripts', 'python.exe')
+    : join(venvDir, 'bin', 'python')
+}
+
+async function preparePythonRuntime(
+  python: string,
+  signal: AbortSignal,
+): Promise<string> {
+  try {
+    await ensurePythonModule(python, 'requests', signal)
+    return python
+  } catch {
+    const venvDir = resolve(process.cwd(), '.paper2code_venv')
+    const venvPython = getVenvPython(venvDir)
+
+    try {
+      await ensureFileExists(venvPython)
+    } catch {
+      await runCommand([python, '-m', 'venv', venvDir], process.cwd(), signal)
+    }
+
+    await ensurePythonModule(venvPython, 'requests', signal)
+    return venvPython
+  }
+}
+
+async function loadMetadata(outputDir: string): Promise<PaperMetadata | null> {
+  try {
+    const raw = await readFile(join(outputDir, 'paper_metadata.json'), 'utf-8')
+    return JSON.parse(raw) as PaperMetadata
+  } catch {
+    return null
+  }
+}
+
+async function collectGeneratedFiles(outputDir: string): Promise<string[]> {
+  const candidates = [
+    'paper_text.md',
+    'paper_metadata.json',
+    'footnotes.md',
+    join('sections'),
+    join('algorithms'),
+    join('equations'),
+    join('tables'),
+  ]
+
+  const existing: string[] = []
+  for (const rel of candidates) {
+    try {
+      await access(join(outputDir, rel), fsConstants.F_OK)
+      existing.push(rel)
+    } catch {
+      // ignore missing optional artifacts
+    }
+  }
+  return existing
+}
+
+function renderToolUseMessage(input: Partial<Input>): string | null {
+  if (!input.arxivId) return null
+  return `paper2code ${input.arxivId}`
+}
+
 export const Paper2CodeTool = buildTool({
-  name: 'paper2code',
-  searchHint: 'Generate code from arXiv papers',
+  name: PAPER2CODE_TOOL_NAME,
+  searchHint: 'generate code from arXiv papers',
   maxResultSizeChars: 100_000,
-  async description(input: any, options: any) {
+  async description() {
     return DESCRIPTION
   },
-  async prompt(options: {
-    getToolPermissionContext: () => Promise<any>
-    tools: any[]
-    agents: any[]
-    allowedAgentTypes?: string[]
-  }) {
+  async prompt() {
     return getPrompt()
   },
   get inputSchema(): InputSchema {
     return inputSchema()
   },
-  get outputSchema(): OutputSchema {
-    return outputSchema()
-  },
   get inputJSONSchema() {
     const schema = zodToJsonSchema(inputSchema())
     schema.type = 'object'
     return schema
+  },
+  get outputSchema(): OutputSchema {
+    return outputSchema()
   },
   userFacingName() {
     return 'Paper2CodeTool'
@@ -73,147 +255,75 @@ export const Paper2CodeTool = buildTool({
   toAutoClassifierInput(input) {
     return `paper2code ${input.arxivId}`
   },
-  async call(input, context, canUseTool, parentMessage, onProgress) {
-    const { arxivId, framework, mode, outputDir, installIfMissing } = input
-
-    // Create output directory
-    const outputPath = outputDir || `./paper2code_output/${arxivId.replace(/[^a-zA-Z0-9]/g, '_')}`
+  renderToolUseMessage,
+  async call(input, context) {
+    const arxivId = normalizeArxivId(input.arxivId)
+    const outputDir = input.outputDir
+      ? resolve(process.cwd(), input.outputDir)
+      : defaultOutputDir(arxivId)
+    const scripts = getScripts()
+    const python = process.env.PYTHON || 'python3'
 
     try {
-      // Report progress
-      onProgress?.({
-        type: 'info',
-        message: `Starting paper2code processing for arXiv ID: ${arxivId}`,
-      })
+      await ensureFileExists(scripts.fetch)
+      await ensureFileExists(scripts.extract)
+      const runtimePython = await preparePythonRuntime(
+        python,
+        context.abortController.signal,
+      )
 
-      // First check if paper2code skill is available
-      let skillAvailable = false
-      try {
-        // Try to use the SkillTool to check if paper2code is available
-        const skillResult = await canUseTool('skill', {
-          skill: 'paper2code',
-          args: `--help`,
-        })
-        skillAvailable = skillResult.success
-      } catch (error) {
-        skillAvailable = false
-      }
+      await mkdir(outputDir, { recursive: true })
 
-      if (!skillAvailable && installIfMissing) {
-        onProgress?.({
-          type: 'info',
-          message: 'paper2code skill not found. Installing...',
-        })
+      await runCommand(
+        [runtimePython, scripts.fetch, arxivId, outputDir],
+        process.cwd(),
+        context.abortController.signal,
+      )
 
-        // Try to install paper2code skill
-        const installResult = await canUseTool('bash', {
-          command: 'npx skills add PrathamLearnsToCode/paper2code/skills/paper2code',
-          description: 'Install paper2code skill',
-        })
+      const paperTextPath = join(outputDir, 'paper_text.md')
+      await ensureFileExists(paperTextPath)
 
-        if (installResult.success) {
-          skillAvailable = true
-          onProgress?.({
-            type: 'info',
-            message: 'paper2code skill installed successfully.',
-          })
-        } else {
-          return {
-            success: false,
-            message: `Failed to install paper2code skill: ${installResult.stderr || installResult.stdout || 'Unknown error'}. Please install manually with: npx skills add PrathamLearnsToCode/paper2code/skills/paper2code`,
-            installed: false,
-            skillAvailable: false,
-          }
-        }
-      }
+      await runCommand(
+        [runtimePython, scripts.extract, paperTextPath, outputDir],
+        process.cwd(),
+        context.abortController.signal,
+      )
 
-      if (skillAvailable) {
-        // Use the paper2code skill via SkillTool
-        onProgress?.({
-          type: 'info',
-          message: `Running paper2code skill with arXiv ID: ${arxivId}`,
-        })
+      const metadata = await loadMetadata(outputDir)
+      const files = await collectGeneratedFiles(outputDir)
 
-        const skillResult = await canUseTool('skill', {
-          skill: 'paper2code',
-          args: `${arxivId} --framework ${framework} --mode ${mode}`,
-        })
-
-        if (skillResult.success) {
-          return {
-            success: true,
-            message: `Paper2Code processing completed for arXiv ID: ${arxivId}. Check output in current directory.`,
-            outputDir: '.',
-            skillAvailable: true,
-            installed: installIfMissing && !skillAvailable,
-          }
-        } else {
-          return {
-            success: false,
-            message: `paper2code skill failed: ${skillResult.stderr || skillResult.stdout || 'Unknown error'}`,
-            skillAvailable: true,
-            installed: installIfMissing && !skillAvailable,
-          }
-        }
-      } else {
-        // Fallback: use local Python scripts from /tmp/paper2code
-        onProgress?.({
-          type: 'info',
-          message: 'Using local paper2code scripts from /tmp/paper2code',
-        })
-
-        // Check if scripts exist
-        const checkResult = await canUseTool('bash', {
-          command: 'test -f /tmp/paper2code/skills/paper2code/scripts/fetch_paper.py && echo "Scripts found" || echo "Scripts missing"',
-          description: 'Check if paper2code scripts exist',
-        })
-
-        if (!checkResult.stdout?.includes('Scripts found')) {
-          return {
-            success: false,
-            message: `paper2code scripts not found in /tmp/paper2code. Please:
-1. Install the paper2code skill manually: npx skills add PrathamLearnsToCode/paper2code/skills/paper2code
-2. Or clone the repository: git clone git@github.com:aresbit/paper2code.git /tmp/paper2code
-3. Or set installIfMissing: true to install automatically`,
-            skillAvailable: false,
-            installed: false,
-          }
-        }
-
-        // Run the fetch script
-        const bashResult = await canUseTool('bash', {
-          command: `cd /tmp/paper2code && python3 skills/paper2code/scripts/fetch_paper.py "${arxivId}" "${outputPath}"`,
-          description: 'Run paper2code fetch script',
-        })
-
-        if (!bashResult.success) {
-          return {
-            success: false,
-            message: `Failed to fetch paper: ${bashResult.stderr || bashResult.stdout || 'Unknown error'}`,
-            skillAvailable: false,
-            installed: false,
-          }
-        }
-
-        onProgress?.({
-          type: 'info',
-          message: 'Paper fetched successfully. For full code generation, install the paper2code skill.',
-        })
-
-        return {
+      return {
+        data: {
           success: true,
-          message: `Paper fetched successfully for arXiv ID: ${arxivId}. Output directory: ${outputPath}. Note: For full code generation, install the paper2code skill with: npx skills add PrathamLearnsToCode/paper2code/skills/paper2code`,
-          outputDir: outputPath,
-          files: ['paper_text.md', 'paper_metadata.json'],
-          skillAvailable: false,
+          message: `paper2code prepared source artifacts for ${arxivId}`,
+          outputDir,
+          files,
+          paperTitle: metadata?.title,
+          paperAuthors: metadata?.authors,
           installed: false,
-        }
+          skillAvailable: true,
+        },
       }
     } catch (error) {
       return {
-        success: false,
-        message: `Error in Paper2CodeTool: ${error instanceof Error ? error.message : String(error)}`,
+        data: {
+          success: false,
+          message: `Paper2CodeTool failed for ${arxivId}: ${error instanceof Error ? error.message : String(error)}`,
+          outputDir,
+          installed: false,
+          skillAvailable: true,
+        },
       }
     }
   },
-})
+  mapToolResultToToolResultBlockParam(output, toolUseID) {
+    const result = output as Output
+    return {
+      tool_use_id: toolUseID,
+      type: 'tool_result',
+      content: result.success
+        ? result.message
+        : `paper2code failed: ${result.message}`,
+    }
+  },
+} satisfies ToolDef<InputSchema, Output>)

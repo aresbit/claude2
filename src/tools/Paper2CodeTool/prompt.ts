@@ -1,3 +1,5 @@
+export const PAPER2CODE_TOOL_NAME = 'paper2code'
+
 export const DESCRIPTION = `Generate citation-anchored code implementations from arXiv papers.
 
 This tool processes arXiv papers and generates complete, annotated code implementations with:
