@@ -10,3 +10,4 @@ coverage
 *.lock
 CLAUDE.md
 .claude/
+.learnings/

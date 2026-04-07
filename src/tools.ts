@@ -22,6 +22,7 @@ import { LlmpegTool } from './tools/LlmpegTool/LlmpegTool.js'
 import { GeminiSubtitleTool } from './tools/GeminiSubtitleTool/GeminiSubtitleTool.js'
 import { RedoTool } from './tools/RedoTool/RedoTool.js'
 import { SETool } from './tools/SETool/SETool.js'
+import { SelfImprovingTool } from './tools/SelfImprovingTool/SelfImprovingTool.js'
 // Dead code elimination: conditional import for ant-only tools
 /* eslint-disable custom-rules/no-process-env-top-level, @typescript-eslint/no-require-imports */
 const REPLTool =
@@ -233,6 +234,7 @@ export function getAllBaseTools(): Tools {
     GeminiSubtitleTool,
     RedoTool,
     SETool,
+    SelfImprovingTool,
     EnterPlanModeTool,
     ...(process.env.USER_TYPE === 'ant' ? [ConfigTool] : []),
     ...(process.env.USER_TYPE === 'ant' ? [TungstenTool] : []),
