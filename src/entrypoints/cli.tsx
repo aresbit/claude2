@@ -21,6 +21,16 @@ if (typeof globalThis.MACRO === "undefined") {
 // eslint-disable-next-line custom-rules/no-top-level-side-effects
 process.env.COREPACK_ENABLE_AUTO_PIN = "0";
 
+// Default tool search to enabled unless explicitly configured by user/project settings.
+// This reduces per-turn prompt bloat from full tool schemas in large toolsets.
+// eslint-disable-next-line custom-rules/no-top-level-side-effects
+process.env.ENABLE_TOOL_SEARCH ??= "true";
+
+// Default prompt-cache TTL to 1h unless explicitly configured otherwise.
+// This prevents expensive full-context rebuilds after >5 minutes idle gaps.
+// eslint-disable-next-line custom-rules/no-top-level-side-effects
+process.env.ENABLE_PROMPT_CACHING_1H ??= "true";
+
 // Set max heap size for child processes in CCR environments (containers have 16GB)
 // eslint-disable-next-line custom-rules/no-top-level-side-effects, custom-rules/no-process-env-top-level, custom-rules/safe-env-boolean-check
 if (process.env.CLAUDE_CODE_REMOTE === "true") {
