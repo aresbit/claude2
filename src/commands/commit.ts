@@ -11,7 +11,6 @@ const ALLOWED_TOOLS = [
 
 function getPromptContent(): string {
   const { commit: commitAttribution } = getAttributionTexts()
-
   let prefix = ''
   if (process.env.USER_TYPE === 'ant' && isUndercover()) {
     prefix = getUndercoverInstructions() + '\n'

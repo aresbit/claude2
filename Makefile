@@ -65,6 +65,11 @@ SRC_DIR := src
 DIST_DIR := dist
 BUILD_DIR := build
 SCRIPTS_DIR := scripts
+ifeq ($(DETECTED_OS),Windows)
+    ANT_WORK_DIR := $(TEMP)\$(PROJECT_NAME)-ant-workspace
+else
+    ANT_WORK_DIR := /tmp/$(PROJECT_NAME)-ant-workspace
+endif
 
 # Executables - use bun if available, fallback to npx bun
 BUN := $(shell which bun 2>/dev/null || echo bun)
@@ -90,7 +95,7 @@ endif
 # Phony targets
 # ============================================================================
 
-.PHONY: all build install install-local uninstall uninstall-local clean dev test lint format check-deps help info
+.PHONY: all build ant ensure-dist install install-local uninstall uninstall-local clean dev test lint format check-deps help info
 
 # ============================================================================
 # Main targets
@@ -116,6 +121,38 @@ else
 	@echo "Building $(PROJECT_NAME) v$(VERSION)..."
 	@$(BUN) run build
 	@echo "Build complete: $(DIST_DIR)/cli.js"
+endif
+
+# Build ant variant in an isolated temp workspace
+ant: check-deps
+ifeq ($(DETECTED_OS),Windows)
+	@echo Building $(PROJECT_NAME) v$(VERSION) in ant mode...
+	@if exist "$(ANT_WORK_DIR)" $(RM) "$(ANT_WORK_DIR)"
+	$(BUN) run build:ant -- --out-dir "$(ANT_WORK_DIR)"
+	@if not exist $(DIST_DIR) $(MKDIR) $(DIST_DIR)
+	$(CP) "$(ANT_WORK_DIR)\dist\cli.js" "$(DIST_DIR)\cli.js"
+	@echo Ant build complete: $(DIST_DIR)\cli.js
+else
+	@echo "Building $(PROJECT_NAME) v$(VERSION) in ant mode..."
+	@$(RM) "$(ANT_WORK_DIR)"
+	@$(BUN) run build:ant -- --out-dir "$(ANT_WORK_DIR)"
+	@$(MKDIR) $(DIST_DIR)
+	@$(CP) "$(ANT_WORK_DIR)/dist/cli.js" "$(DIST_DIR)/cli.js"
+	@echo "Ant build complete: $(DIST_DIR)/cli.js"
+endif
+
+# Ensure build artifact exists before install (no implicit rebuild)
+ensure-dist:
+ifeq ($(DETECTED_OS),Windows)
+	@if not exist "$(DIST_DIR)\cli.js" ( \
+		echo Error: "$(DIST_DIR)\cli.js" not found. Run "make build" or "make ant" first. & \
+		exit /b 1 \
+	)
+else
+	@if [ ! -f "$(DIST_DIR)/cli.js" ]; then \
+		echo "Error: $(DIST_DIR)/cli.js not found. Run 'make build' or 'make ant' first."; \
+		exit 1; \
+	fi
 endif
 
 # Development mode
@@ -173,7 +210,7 @@ endif
 # ============================================================================
 
 # System-wide installation (Unix) or user installation (Windows)
-install: build
+install: ensure-dist
 ifeq ($(DETECTED_OS),Windows)
 	@echo Installing $(PROJECT_NAME) v$(VERSION) to $(PREFIX)...
 	@if not exist "$(BIN_DIR)" $(MKDIR) "$(BIN_DIR)"
@@ -197,7 +234,7 @@ else
 endif
 
 # User-local installation
-install-local: build
+install-local: ensure-dist
 ifeq ($(DETECTED_OS),Windows)
 	@echo Installing $(PROJECT_NAME) v$(VERSION) to user directory...
 	@if not exist "$(USERPROFILE)\.local\bin" $(MKDIR) "$(USERPROFILE)\.local\bin"
@@ -287,6 +324,7 @@ ifeq ($(DETECTED_OS),Windows)
 	@echo.
 	@echo Usage:
 	@echo   make build           Build the project
+	@echo   make ant             Build ant variant in isolated temp workspace
 	@echo   make run             Run the built application
 	@echo   make install         Install to user directory
 	@echo   make install-local   Install to user directory
@@ -312,6 +350,7 @@ else
 	@echo ""
 	@echo "Usage:"
 	@echo "  make build           Build the project"
+	@echo "  make ant             Build ant variant in isolated temp workspace"
 	@echo "  make run             Run the built application"
 	@echo "  make install         Install system-wide (requires sudo)"
 	@echo "  make install-local   Install to user directory (~/.local/)"
