@@ -17,8 +17,6 @@ import { MemoryTool } from './tools/MemoryTool/MemoryTool.js'
 import { Paper2CodeTool } from './tools/Paper2CodeTool/Paper2CodeTool.js'
 import { WikiTool } from './tools/WikiTool/WikiTool.js'
 import { KimiTool } from './tools/KimiTool/KimiTool.js'
-import { LlytdlpTool } from './tools/LlytdlpTool/LlytdlpTool.js'
-import { LlmpegTool } from './tools/LlmpegTool/LlmpegTool.js'
 import { GeminiSubtitleTool } from './tools/GeminiSubtitleTool/GeminiSubtitleTool.js'
 import { RedoTool } from './tools/RedoTool/RedoTool.js'
 import { SETool } from './tools/SETool/SETool.js'
@@ -229,8 +227,6 @@ export function getAllBaseTools(): Tools {
     Paper2CodeTool,
     WikiTool,
     KimiTool,
-    LlytdlpTool,
-    LlmpegTool,
     GeminiSubtitleTool,
     RedoTool,
     SETool,
