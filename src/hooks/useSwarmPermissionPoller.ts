@@ -9,7 +9,7 @@
  * in useCanUseTool.ts, which creates pending requests that this hook monitors.
  */
 
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useInterval } from 'usehooks-ts'
 import { logForDebugging } from '../utils/debug.js'
 import { errorMessage } from '../utils/errors.js'
@@ -74,6 +74,22 @@ type PendingCallbackRegistry = Map<string, PermissionResponseCallback>
 
 // Module-level registry that persists across renders
 const pendingCallbacks: PendingCallbackRegistry = new Map()
+const pendingCallbackSubscribers = new Set<() => void>()
+
+function notifyPendingCallbackSubscribers(): void {
+  for (const subscriber of pendingCallbackSubscribers) {
+    subscriber()
+  }
+}
+
+function subscribePendingCallbackCount(
+  callback: () => void,
+): () => void {
+  pendingCallbackSubscribers.add(callback)
+  return () => {
+    pendingCallbackSubscribers.delete(callback)
+  }
+}
 
 /**
  * Register a callback for a pending permission request
@@ -83,6 +99,7 @@ export function registerPermissionCallback(
   callback: PermissionResponseCallback,
 ): void {
   pendingCallbacks.set(callback.requestId, callback)
+  notifyPendingCallbackSubscribers()
   logForDebugging(
     `[SwarmPermissionPoller] Registered callback for request ${callback.requestId}`,
   )
@@ -92,7 +109,9 @@ export function registerPermissionCallback(
  * Unregister a callback (e.g., when the request is resolved locally or times out)
  */
 export function unregisterPermissionCallback(requestId: string): void {
-  pendingCallbacks.delete(requestId)
+  if (pendingCallbacks.delete(requestId)) {
+    notifyPendingCallbackSubscribers()
+  }
   logForDebugging(
     `[SwarmPermissionPoller] Unregistered callback for request ${requestId}`,
   )
@@ -111,8 +130,13 @@ export function hasPermissionCallback(requestId: string): boolean {
  * and also used in tests for isolation.
  */
 export function clearAllPendingCallbacks(): void {
+  const hadCallbacks =
+    pendingCallbacks.size > 0 || pendingSandboxCallbacks.size > 0
   pendingCallbacks.clear()
   pendingSandboxCallbacks.clear()
+  if (hadCallbacks) {
+    notifyPendingCallbackSubscribers()
+  }
 }
 
 /**
@@ -143,6 +167,7 @@ export function processMailboxPermissionResponse(params: {
 
   // Remove from registry before invoking callback
   pendingCallbacks.delete(params.requestId)
+  notifyPendingCallbackSubscribers()
 
   if (params.decision === 'approved') {
     const permissionUpdates = parsePermissionUpdates(params.permissionUpdates)
@@ -244,6 +269,7 @@ function processResponse(response: PermissionResponse): boolean {
 
   // Remove from registry before invoking callback
   pendingCallbacks.delete(response.requestId)
+  notifyPendingCallbackSubscribers()
 
   if (response.decision === 'approved') {
     const permissionUpdates = parsePermissionUpdates(response.permissionUpdates)
@@ -267,6 +293,15 @@ function processResponse(response: PermissionResponse): boolean {
  */
 export function useSwarmPermissionPoller(): void {
   const isProcessingRef = useRef(false)
+  const [pendingCallbackCount, setPendingCallbackCount] = useState(
+    pendingCallbacks.size,
+  )
+
+  useEffect(() => {
+    return subscribePendingCallbackCount(() => {
+      setPendingCallbackCount(pendingCallbacks.size)
+    })
+  }, [])
 
   const poll = useCallback(async () => {
     // Don't poll if not a swarm worker
@@ -318,13 +353,13 @@ export function useSwarmPermissionPoller(): void {
   }, [])
 
   // Only poll if we're a swarm worker
-  const shouldPoll = isSwarmWorker()
+  const shouldPoll = isSwarmWorker() && pendingCallbackCount > 0
   useInterval(() => void poll(), shouldPoll ? POLL_INTERVAL_MS : null)
 
   // Initial poll on mount
   useEffect(() => {
-    if (isSwarmWorker()) {
+    if (shouldPoll) {
       void poll()
     }
-  }, [poll])
+  }, [poll, shouldPoll])
 }

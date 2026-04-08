@@ -51,15 +51,12 @@ export function useNotifyAfterTimeout(
   }, [])
 
   useEffect(() => {
-    let hasNotified = false
-    const timer = setInterval(() => {
-      if (shouldNotify(DEFAULT_INTERACTION_THRESHOLD_MS) && !hasNotified) {
-        hasNotified = true
-        clearInterval(timer)
+    const timer = setTimeout(() => {
+      if (shouldNotify(DEFAULT_INTERACTION_THRESHOLD_MS)) {
         void sendNotification({ message, notificationType }, terminal)
       }
     }, DEFAULT_INTERACTION_THRESHOLD_MS)
 
-    return () => clearInterval(timer)
+    return () => clearTimeout(timer)
   }, [message, notificationType, terminal])
 }
