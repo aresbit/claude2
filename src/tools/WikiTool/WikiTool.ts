@@ -25,18 +25,23 @@ const inputSchema = lazySchema(() =>
     title: z.string().describe('Title for the saved content'),
     description: z.string().optional().describe('Brief description of the content'),
     category: z
-      .enum(WIKI_CATEGORIES)
+      .string()
+      .optional()
       .default('article')
-      .describe('Content category'),
-    tags: z.array(z.string()).optional().describe('Tags for categorization'),
+      .describe('Content category: article, paper, note, or image'),
+    tags: z
+      .union([z.array(z.string()), z.string()])
+      .optional()
+      .describe('Tags for categorization. Supports array or comma-separated string.'),
     saveMemory: z
       .boolean()
       .default(true)
       .describe('Whether to save a companion memory file'),
     memoryType: z
-      .enum(MEMORY_TYPES)
+      .string()
+      .optional()
       .default('project')
-      .describe('Type of memory to save when saveMemory is true'),
+      .describe('Memory type when saveMemory is true (user, feedback, project, or reference)'),
   }),
 )
 
@@ -79,6 +84,33 @@ function getCategoryDirectory(category: Input['category']): string {
     default:
       return 'articles'
   }
+}
+
+function normalizeCategory(category: string | undefined): (typeof WIKI_CATEGORIES)[number] {
+  const value = (category || 'article').trim().toLowerCase()
+  if (value === 'paper' || value === 'papers') return 'paper'
+  if (value === 'note' || value === 'notes') return 'note'
+  if (value === 'image' || value === 'images' || value === 'img') return 'image'
+  return 'article'
+}
+
+function normalizeTags(tags: Input['tags']): string[] {
+  if (!tags) return []
+  if (Array.isArray(tags)) {
+    return tags.map(tag => tag.trim()).filter(Boolean)
+  }
+  return tags
+    .split(',')
+    .map(tag => tag.trim())
+    .filter(Boolean)
+}
+
+function normalizeMemoryType(memoryType: string | undefined): MemoryType {
+  const cleaned = (memoryType || 'project').trim().replace(/^['"]|['"]$/g, '')
+  const normalized = cleaned.toLowerCase()
+  return MEMORY_TYPES.includes(normalized as MemoryType)
+    ? (normalized as MemoryType)
+    : 'project'
 }
 
 function getWikiBasePath(): string {
@@ -176,7 +208,7 @@ export const WikiTool = buildTool({
   },
   shouldDefer: false,
   isConcurrencySafe() {
-    return false
+    return true
   },
   isReadOnly() {
     return false
@@ -189,11 +221,14 @@ export const WikiTool = buildTool({
   renderToolResultMessage,
   async call(input, context) {
     const abortController = createAbortController(context.abortController.signal)
+    const normalizedCategory = normalizeCategory(input.category)
+    const normalizedTags = normalizeTags(input.tags)
+    const normalizedMemoryType = normalizeMemoryType(input.memoryType)
     const now = new Date()
     const isoTimestamp = now.toISOString()
     const isoDate = isoTimestamp.split('T')[0] || isoTimestamp
     const wikiBasePath = getWikiBasePath()
-    const categoryDir = getCategoryDirectory(input.category)
+    const categoryDir = getCategoryDirectory(normalizedCategory)
     const sourceDir = join(wikiBasePath, 'raw_sources', categoryDir)
     const filename = `${sanitizeFilename(input.title)}.md`
     const sourceFile = join(sourceDir, filename)
@@ -207,7 +242,15 @@ export const WikiTool = buildTool({
       await mkdir(sourceDir, { recursive: true })
       await writeFile(
         sourceFile,
-        buildMarkdownContent(input, fetched.content, isoDate),
+        buildMarkdownContent(
+          {
+            ...input,
+            category: normalizedCategory,
+            tags: normalizedTags,
+          },
+          fetched.content,
+          isoDate,
+        ),
         'utf-8',
       )
 
@@ -215,11 +258,19 @@ export const WikiTool = buildTool({
       if (input.saveMemory) {
         const memoryStore = new MemoryStore()
         const memory = await memoryStore.saveMemory(
-          input.memoryType as MemoryType,
+          normalizedMemoryType,
           `wiki_${sanitizeFilename(input.title)}`,
           `Wiki content: ${input.title} from ${input.url}`,
-          buildMemoryContent(input, sourceFile, isoTimestamp),
-          ['wiki', input.category, ...(input.tags || [])],
+          buildMemoryContent(
+            {
+              ...input,
+              category: normalizedCategory,
+              tags: normalizedTags,
+            },
+            sourceFile,
+            isoTimestamp,
+          ),
+          ['wiki', normalizedCategory, ...normalizedTags],
         )
         memoryFile = memory.filePath
       }
@@ -230,7 +281,7 @@ export const WikiTool = buildTool({
         join(logDir, 'log.md'),
         `## [${isoDate}] ingest | ${input.title}
 - Source: ${input.url}
-- Category: ${input.category}
+- Category: ${normalizedCategory}
 - File: ${filename}
 - Memory: ${input.saveMemory ? 'saved' : 'not saved'}
 
@@ -262,12 +313,13 @@ export const WikiTool = buildTool({
   },
   mapToolResultToToolResultBlockParam(content, toolUseID) {
     const output = content as Output
+    const summary = output.success
+      ? `Saved "${output.title}" to wiki`
+      : `Failed to save "${output.title}" to wiki: ${output.message}`
     return {
       tool_use_id: toolUseID,
       type: 'tool_result',
-      content: output.success
-        ? `Saved "${output.title}" to wiki`
-        : `Failed to save "${output.title}" to wiki: ${output.message}`,
+      content: [{ type: 'text', text: summary }],
     }
   },
 } satisfies ToolDef<InputSchema, Output>)

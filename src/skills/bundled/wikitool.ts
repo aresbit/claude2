@@ -82,7 +82,7 @@ URL: ${url || '未提供'}
 - category: ${category}
 - tags: ${tags ? tags.split(/\s*,\s*/) : []}
 - saveMemory: true
-- memoryType: 'project'
+- memoryType: project
 
 如果URL无效或缺失，请询问用户提供有效的URL。
 `

@@ -55,6 +55,11 @@ import {
 import { queryCheckpoint } from '../queryProfiler.js'
 import { parseSlashCommand } from '../slashCommandParsing.js'
 import {
+  consumeHandoffQuickResumeIfYes,
+  dismissHandoffQuickResumeOnUserInput,
+  clearHandoffQuickResume,
+} from '../handoffResume.js'
+import {
   hasUltraplanKeyword,
   replaceUltraplanKeyword,
 } from '../ultraplan/keyword.js'
@@ -313,6 +318,19 @@ async function processUserInputBase(
 
   if (typeof input === 'string') {
     inputString = input
+    if (mode === 'prompt') {
+      const trimmed = inputString.trim()
+      if (consumeHandoffQuickResumeIfYes(trimmed)) {
+        inputString = '/resume-handoff'
+        normalizedInput = inputString
+      } else {
+        // Any explicit non-yes input dismisses the one-shot startup shortcut
+        // so normal "y" conversations are unaffected afterward.
+        dismissHandoffQuickResumeOnUserInput(trimmed)
+      }
+    } else {
+      clearHandoffQuickResume()
+    }
   } else if (input.length > 0) {
     queryCheckpoint('query_image_processing_start')
     const processedBlocks: ContentBlockParam[] = []

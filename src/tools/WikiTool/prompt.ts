@@ -1,4 +1,4 @@
-export const WIKI_TOOL_NAME = 'WikiTool'
+export const WIKI_TOOL_NAME = 'wikitool'
 
 export const DESCRIPTION = `
 - Fetches web content and saves it to personal wiki knowledge base at ~/yyswiki/raw_sources/
