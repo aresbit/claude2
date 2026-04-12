@@ -34,7 +34,30 @@ export function useAnimationFrame(
   const [viewportRef, { isVisible }] = useTerminalViewport()
   const [time, setTime] = useState(() => clock?.now() ?? 0)
 
-  const active = isVisible && intervalMs !== null
+  const disableAnimationsRaw = process.env.OPENCC_DISABLE_ANIMATIONS
+  const disableAnimations =
+    disableAnimationsRaw === '1' ||
+    disableAnimationsRaw === 'true' ||
+    disableAnimationsRaw === 'yes'
+
+  let effectiveInterval = intervalMs
+  if (disableAnimations) {
+    effectiveInterval = null
+  }
+  if (effectiveInterval !== null) {
+    const scaleRaw = process.env.OPENCC_ANIMATION_SCALE
+    const minRaw = process.env.OPENCC_MIN_ANIMATION_MS
+    const scale = scaleRaw ? Number(scaleRaw) : 1
+    const min = minRaw ? Number(minRaw) : 0
+    if (Number.isFinite(scale) && scale > 1) {
+      effectiveInterval = Math.ceil(effectiveInterval * scale)
+    }
+    if (Number.isFinite(min) && min > 0) {
+      effectiveInterval = Math.max(effectiveInterval, min)
+    }
+  }
+
+  const active = isVisible && effectiveInterval !== null
 
   useEffect(() => {
     if (!clock || !active) return
@@ -43,15 +66,15 @@ export function useAnimationFrame(
 
     const onChange = (): void => {
       const now = clock.now()
-      if (now - lastUpdate >= intervalMs!) {
+      if (now - lastUpdate >= effectiveInterval!) {
         lastUpdate = now
         setTime(now)
       }
     }
 
     // keepAlive: true — visible animations drive the clock
-    return clock.subscribe(onChange, true)
-  }, [clock, intervalMs, active])
+    return clock.subscribe(onChange, true, effectiveInterval ?? undefined)
+  }, [clock, effectiveInterval, active])
 
   return [viewportRef, time]
 }

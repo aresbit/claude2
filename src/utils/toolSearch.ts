@@ -425,6 +425,20 @@ export async function isToolSearchEnabled(
     return false
   }
 
+  // Keep definitive check aligned with isToolSearchEnabledOptimistic():
+  // default (unset ENABLE_TOOL_SEARCH) should disable tool_reference on
+  // first-party provider routed through non-first-party base URLs (proxies),
+  // because many gateways reject tool_reference blocks with 400 deserialization
+  // errors. Users can explicitly opt in by setting ENABLE_TOOL_SEARCH.
+  if (getAPIProvider() === 'firstParty' && !isFirstPartyAnthropicBaseUrl()) {
+    logForDebugging(
+      `Tool search disabled: ANTHROPIC_BASE_URL=${process.env.ANTHROPIC_BASE_URL} is not a first-party Anthropic host. ` +
+        `This deployment does not support tool_reference blocks.`,
+    )
+    logModeDecision(false, 'standard', 'proxy_base_url_unsupported')
+    return false
+  }
+
   // Check if ToolSearchTool is available (respects disallowedTools)
   if (!isToolSearchToolAvailable(tools)) {
     logForDebugging(

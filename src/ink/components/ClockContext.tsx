@@ -3,12 +3,19 @@ import React, { createContext, useEffect, useState } from 'react';
 import { FRAME_INTERVAL_MS } from '../constants.js';
 import { useTerminalFocus } from '../hooks/use-terminal-focus.js';
 export type Clock = {
-  subscribe: (onChange: () => void, keepAlive: boolean) => () => void;
+  subscribe: (
+    onChange: () => void,
+    keepAlive: boolean,
+    intervalMs?: number,
+  ) => () => void;
   now: () => number;
   setTickInterval: (ms: number) => void;
 };
 export function createClock(tickIntervalMs: number): Clock {
-  const subscribers = new Map<() => void, boolean>();
+  const subscribers = new Map<
+    () => void,
+    { keepAlive: boolean; intervalMs?: number }
+  >();
   let interval: ReturnType<typeof setInterval> | null = null;
   let currentTickIntervalMs = tickIntervalMs;
   let startTime = 0;
@@ -22,7 +29,16 @@ export function createClock(tickIntervalMs: number): Clock {
     }
   }
   function updateInterval(): void {
-    const anyKeepAlive = [...subscribers.values()].some(Boolean);
+    const keepAliveIntervals: number[] = [];
+    for (const entry of subscribers.values()) {
+      if (entry.keepAlive) {
+        const v = entry.intervalMs;
+        if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
+          keepAliveIntervals.push(v);
+        }
+      }
+    }
+    const anyKeepAlive = keepAliveIntervals.length > 0;
     if (anyKeepAlive) {
       if (interval) {
         clearInterval(interval);
@@ -31,15 +47,17 @@ export function createClock(tickIntervalMs: number): Clock {
       if (startTime === 0) {
         startTime = Date.now();
       }
-      interval = setInterval(tick, currentTickIntervalMs);
+      const minInterval = Math.min(...keepAliveIntervals);
+      const nextInterval = Math.max(currentTickIntervalMs, minInterval);
+      interval = setInterval(tick, nextInterval);
     } else if (interval) {
       clearInterval(interval);
       interval = null;
     }
   }
   return {
-    subscribe(onChange, keepAlive) {
-      subscribers.set(onChange, keepAlive);
+    subscribe(onChange, keepAlive, intervalMs) {
+      subscribers.set(onChange, { keepAlive, intervalMs });
       updateInterval();
       return () => {
         subscribers.delete(onChange);

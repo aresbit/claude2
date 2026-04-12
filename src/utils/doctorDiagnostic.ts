@@ -1,4 +1,3 @@
-import { execa } from 'execa'
 import { readFile, realpath } from 'fs/promises'
 import { homedir } from 'os'
 import { delimiter, join, posix, win32 } from 'path'
@@ -51,6 +50,8 @@ export type InstallationType =
   | 'development'
   | 'unknown'
 
+let installationTypePromise: Promise<InstallationType> | null = null
+
 export type DiagnosticInfo = {
   installationType: InstallationType
   version: string
@@ -84,67 +85,86 @@ function getNormalizedPaths(): [invokedPath: string, execPath: string] {
 }
 
 export async function getCurrentInstallationType(): Promise<InstallationType> {
-  if (process.env.NODE_ENV === 'development') {
-    return 'development'
-  }
+  if (installationTypePromise) return installationTypePromise
 
-  const [invokedPath] = getNormalizedPaths()
-
-  // Check if running in bundled mode first
-  if (isInBundledMode()) {
-    // Check if this bundled instance was installed by a package manager
-    if (
-      detectHomebrew() ||
-      detectWinget() ||
-      detectMise() ||
-      detectAsdf() ||
-      (await detectPacman()) ||
-      (await detectDeb()) ||
-      (await detectRpm()) ||
-      (await detectApk())
-    ) {
-      return 'package-manager'
+  installationTypePromise = (async (): Promise<InstallationType> => {
+    if (process.env.NODE_ENV === 'development') {
+      return 'development'
     }
-    return 'native'
-  }
 
-  // Check if running from local npm installation
-  if (isRunningFromLocalInstallation()) {
-    return 'npm-local'
-  }
+    const [invokedPath, execPath] = getNormalizedPaths()
 
-  // Check if we're in a typical npm global location
-  const npmGlobalPaths = [
-    '/usr/local/lib/node_modules',
-    '/usr/lib/node_modules',
-    '/opt/homebrew/lib/node_modules',
-    '/opt/homebrew/bin',
-    '/usr/local/bin',
-    '/.nvm/versions/node/', // nvm installations
-  ]
+    // Fast path for script invocation through Bun (e.g. `bun run cli.js`).
+    // Running npm prefix detection here is expensive and not useful for
+    // source/script launches that are not installed binaries.
+    if (
+      execPath.includes('/bun') &&
+      (invokedPath.endsWith('.js') ||
+        invokedPath.endsWith('.ts') ||
+        invokedPath.endsWith('.tsx'))
+    ) {
+      return 'development'
+    }
 
-  if (npmGlobalPaths.some(path => invokedPath.includes(path))) {
-    return 'npm-global'
-  }
+    // Check if running in bundled mode first
+    if (isInBundledMode()) {
+      // Check if this bundled instance was installed by a package manager
+      if (
+        detectHomebrew() ||
+        detectWinget() ||
+        detectMise() ||
+        detectAsdf() ||
+        (await detectPacman()) ||
+        (await detectDeb()) ||
+        (await detectRpm()) ||
+        (await detectApk())
+      ) {
+        return 'package-manager'
+      }
+      return 'native'
+    }
 
-  // Also check for npm/nvm in the path even if not in standard locations
-  if (invokedPath.includes('/npm/') || invokedPath.includes('/nvm/')) {
-    return 'npm-global'
-  }
+    // Check if running from local npm installation
+    if (isRunningFromLocalInstallation()) {
+      return 'npm-local'
+    }
 
-  const npmConfigResult = await execa('npm config get prefix', {
-    shell: true,
-    reject: false,
-  })
-  const globalPrefix =
-    npmConfigResult.exitCode === 0 ? npmConfigResult.stdout.trim() : null
+    // Check if we're in a typical npm global location
+    const npmGlobalPaths = [
+      '/usr/local/lib/node_modules',
+      '/usr/lib/node_modules',
+      '/opt/homebrew/lib/node_modules',
+      '/opt/homebrew/bin',
+      '/usr/local/bin',
+      '/.nvm/versions/node/', // nvm installations
+    ]
 
-  if (globalPrefix && invokedPath.startsWith(globalPrefix)) {
-    return 'npm-global'
-  }
+    if (npmGlobalPaths.some(path => invokedPath.includes(path))) {
+      return 'npm-global'
+    }
 
-  // If we can't determine, return unknown
-  return 'unknown'
+    // Also check for npm/nvm in the path even if not in standard locations
+    if (invokedPath.includes('/npm/') || invokedPath.includes('/nvm/')) {
+      return 'npm-global'
+    }
+
+    const npmConfigResult = await execFileNoThrow('npm', [
+      'config',
+      'get',
+      'prefix',
+    ])
+    const globalPrefix =
+      npmConfigResult.code === 0 ? npmConfigResult.stdout.trim() : null
+
+    if (globalPrefix && invokedPath.startsWith(globalPrefix)) {
+      return 'npm-global'
+    }
+
+    // If we can't determine, return unknown
+    return 'unknown'
+  })()
+
+  return installationTypePromise
 }
 
 async function getInstallationPath(): Promise<string> {

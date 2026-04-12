@@ -1140,5 +1140,13 @@ async function* runShellCommand({
     }
   } finally {
     TaskOutput.stopPolling(shellCommand.taskOutput.taskId);
+    // Ensure cleanup runs on every exit path (success, rejection, abort).
+    // Skip when backgrounded — LocalShellTask owns cleanup for those.
+    if (!backgroundShellId && shellCommand.status !== 'backgrounded') {
+      if (foregroundTaskId) {
+        unregisterForeground(foregroundTaskId, setAppState);
+      }
+      shellCommand.cleanup();
+    }
   }
 }

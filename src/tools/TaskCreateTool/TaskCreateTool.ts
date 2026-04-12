@@ -64,6 +64,7 @@ export const TaskCreateTool = buildTool({
   userFacingName() {
     return 'TaskCreate'
   },
+  alwaysLoad: true,
   shouldDefer: true,
   isEnabled() {
     return isTodoV2Enabled()

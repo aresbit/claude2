@@ -1567,64 +1567,88 @@ function stripUnavailableToolReferencesFromUserMessage(
   // Check if any tool_reference blocks point to unavailable tools
   const hasUnavailableReference = content.some(
     block =>
-      block.type === 'tool_result' &&
-      Array.isArray(block.content) &&
-      block.content.some(c => {
-        if (!isToolReferenceBlock(c)) return false
-        const toolName = (c as { tool_name?: string }).tool_name
-        return (
-          toolName && !availableToolNames.has(normalizeLegacyToolName(toolName))
-        )
-      }),
+      block.type === 'tool_reference' ||
+      (block.type === 'tool_result' &&
+        Array.isArray(block.content) &&
+        block.content.some(c => {
+          if (!isToolReferenceBlock(c)) return false
+          const toolName = (c as { tool_name?: string }).tool_name
+          return (
+            toolName &&
+            !availableToolNames.has(normalizeLegacyToolName(toolName))
+          )
+        })),
   )
 
   if (!hasUnavailableReference) {
     return message
   }
 
+  const nextContent = content
+    .map(block => {
+      if (block.type === 'tool_reference') {
+        return null
+      }
+      if (block.type !== 'tool_result' || !Array.isArray(block.content)) {
+        return block
+      }
+
+      // Filter out tool_reference blocks for unavailable tools
+      const filteredContent = block.content.filter(c => {
+        if (!isToolReferenceBlock(c)) return true
+        const rawToolName = (c as { tool_name?: string }).tool_name
+        if (!rawToolName) return true
+        const toolName = normalizeLegacyToolName(rawToolName)
+        const isAvailable = availableToolNames.has(toolName)
+        if (!isAvailable) {
+          logForDebugging(
+            `Filtering out tool_reference for unavailable tool: ${toolName}`,
+            { level: 'warn' },
+          )
+        }
+        return isAvailable
+      })
+
+      // If all content was filtered out, replace with a placeholder
+      if (filteredContent.length === 0) {
+        return {
+          ...block,
+          content: [
+            {
+              type: 'text' as const,
+              text: '[Tool references removed - tools no longer available]',
+            },
+          ],
+        }
+      }
+
+      return {
+        ...block,
+        content: filteredContent,
+      }
+    })
+    .filter(Boolean)
+
+  if (nextContent.length === 0) {
+    return {
+      ...message,
+      message: {
+        ...message.message,
+        content: [
+          {
+            type: 'text' as const,
+            text: '[Tool references removed - tools no longer available]',
+          },
+        ],
+      },
+    }
+  }
+
   return {
     ...message,
     message: {
       ...message.message,
-      content: content.map(block => {
-        if (block.type !== 'tool_result' || !Array.isArray(block.content)) {
-          return block
-        }
-
-        // Filter out tool_reference blocks for unavailable tools
-        const filteredContent = block.content.filter(c => {
-          if (!isToolReferenceBlock(c)) return true
-          const rawToolName = (c as { tool_name?: string }).tool_name
-          if (!rawToolName) return true
-          const toolName = normalizeLegacyToolName(rawToolName)
-          const isAvailable = availableToolNames.has(toolName)
-          if (!isAvailable) {
-            logForDebugging(
-              `Filtering out tool_reference for unavailable tool: ${toolName}`,
-              { level: 'warn' },
-            )
-          }
-          return isAvailable
-        })
-
-        // If all content was filtered out, replace with a placeholder
-        if (filteredContent.length === 0) {
-          return {
-            ...block,
-            content: [
-              {
-                type: 'text' as const,
-                text: '[Tool references removed - tools no longer available]',
-              },
-            ],
-          }
-        }
-
-        return {
-          ...block,
-          content: filteredContent,
-        }
-      }),
+      content: nextContent as typeof content,
     },
   }
 }
@@ -1701,47 +1725,70 @@ export function stripToolReferenceBlocksFromUserMessage(
 
   const hasToolReference = content.some(
     block =>
-      block.type === 'tool_result' &&
-      Array.isArray(block.content) &&
-      block.content.some(isToolReferenceBlock),
+      block.type === 'tool_reference' ||
+      (block.type === 'tool_result' &&
+        Array.isArray(block.content) &&
+        block.content.some(isToolReferenceBlock)),
   )
 
   if (!hasToolReference) {
     return message
   }
 
+  const nextContent = content
+    .map(block => {
+      if (block.type === 'tool_reference') {
+        return null
+      }
+      if (block.type !== 'tool_result' || !Array.isArray(block.content)) {
+        return block
+      }
+
+      // Filter out tool_reference blocks from tool_result content
+      const filteredContent = block.content.filter(
+        c => !isToolReferenceBlock(c),
+      )
+
+      // If all content was tool_reference blocks, replace with a placeholder
+      if (filteredContent.length === 0) {
+        return {
+          ...block,
+          content: [
+            {
+              type: 'text' as const,
+              text: '[Tool references removed - tool search not enabled]',
+            },
+          ],
+        }
+      }
+
+      return {
+        ...block,
+        content: filteredContent,
+      }
+    })
+    .filter(Boolean)
+
+  if (nextContent.length === 0) {
+    return {
+      ...message,
+      message: {
+        ...message.message,
+        content: [
+          {
+            type: 'text' as const,
+            text: '[Tool references removed - tool search not enabled]',
+          },
+        ],
+      },
+    }
+  }
+
   return {
     ...message,
     message: {
       ...message.message,
-      content: content.map(block => {
-        if (block.type !== 'tool_result' || !Array.isArray(block.content)) {
-          return block
-        }
-
-        // Filter out tool_reference blocks from tool_result content
-        const filteredContent = block.content.filter(
-          c => !isToolReferenceBlock(c),
-        )
-
-        // If all content was tool_reference blocks, replace with a placeholder
-        if (filteredContent.length === 0) {
-          return {
-            ...block,
-            content: [
-              {
-                type: 'text' as const,
-                text: '[Tool references removed - tool search not enabled]',
-              },
-            ],
-          }
-        }
-
-        return {
-          ...block,
-          content: filteredContent,
-        }
-      }),
+      content: nextContent as typeof content,
     },
   }
 }

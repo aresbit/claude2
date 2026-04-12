@@ -544,10 +544,20 @@ export async function runHeadless(
     proactiveModule.activateProactive('command')
   }
 
-  // Periodically force a full GC to keep memory usage in check
+  // Periodically force a GC to keep memory usage in check.
+  // Gate by RSS threshold to avoid burning CPU on idle sessions.
   if (typeof Bun !== 'undefined') {
-    const gcTimer = setInterval(Bun.gc, 1000)
-    gcTimer.unref()
+    const intervalMs = Number(process.env.OPENCC_GC_INTERVAL_MS ?? '10000')
+    const rssThresholdMb = Number(process.env.OPENCC_GC_RSS_MB ?? '1024')
+    if (Number.isFinite(intervalMs) && intervalMs > 0) {
+      const gcTimer = setInterval(() => {
+        const rssMb = process.memoryUsage().rss / (1024 * 1024)
+        if (Number.isFinite(rssMb) && rssMb >= rssThresholdMb) {
+          Bun.gc()
+        }
+      }, intervalMs)
+      gcTimer.unref()
+    }
   }
 
   // Start headless profiler for first turn

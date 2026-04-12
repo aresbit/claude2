@@ -1,8 +1,5 @@
 import { randomUUID } from 'crypto'
-import { type FSWatcher, watch } from 'fs'
-import { mkdir } from 'fs/promises'
-import { basename, dirname } from 'path'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { useInterval } from 'usehooks-ts'
 import type { ToolUseConfirm } from '../components/permissions/PermissionRequest.js'
 import { TEAMMATE_MESSAGE_TAG } from '../constants/xml.js'
@@ -64,7 +61,6 @@ import {
   isTeamPermissionUpdate,
   markMessagesAsRead,
   readUnreadMessages,
-  getInboxPath,
   type TeammateMessage,
   writeToMailbox,
 } from '../utils/teammateMailbox.js'
@@ -108,18 +104,7 @@ function getAgentNameToPoll(appState: AppState): string | undefined {
   return undefined
 }
 
-const INBOX_POLL_INTERVAL_MIN_MS = 1000
-const INBOX_POLL_INTERVAL_MAX_MS = 8000
-const INBOX_FALLBACK_POLL_MS = 15000
-const INBOX_WATCH_DEBOUNCE_MS = 150
-
-function getBackoffIntervalMs(consecutiveEmptyPolls: number): number {
-  // 1s -> 2s -> 4s -> 8s (cap)
-  return Math.min(
-    INBOX_POLL_INTERVAL_MIN_MS * 2 ** Math.max(0, consecutiveEmptyPolls),
-    INBOX_POLL_INTERVAL_MAX_MS,
-  )
-}
+const INBOX_POLL_INTERVAL_MS = 1000
 
 type Props = {
   enabled: boolean
@@ -150,30 +135,6 @@ export function useInboxPoller({
   const setAppState = useSetAppState()
   const inboxMessageCount = useAppState(s => s.inbox.messages.length)
   const terminal = useTerminalNotification()
-  const [pollIntervalMs, setPollIntervalMs] = useState(
-    INBOX_POLL_INTERVAL_MIN_MS,
-  )
-  const [hasInboxWatcher, setHasInboxWatcher] = useState(false)
-  const consecutiveEmptyPollsRef = useRef(0)
-
-  const updatePollCadence = useCallback(
-    (hadUnreadMessages: boolean) => {
-      if (hadUnreadMessages) {
-        consecutiveEmptyPollsRef.current = 0
-        if (pollIntervalMs !== INBOX_POLL_INTERVAL_MIN_MS) {
-          setPollIntervalMs(INBOX_POLL_INTERVAL_MIN_MS)
-        }
-        return
-      }
-
-      consecutiveEmptyPollsRef.current += 1
-      const nextInterval = getBackoffIntervalMs(consecutiveEmptyPollsRef.current)
-      if (nextInterval !== pollIntervalMs) {
-        setPollIntervalMs(nextInterval)
-      }
-    },
-    [pollIntervalMs],
-  )
 
   const poll = useCallback(async () => {
     if (!enabled) return
@@ -188,12 +149,7 @@ export function useInboxPoller({
       currentAppState.teamContext?.teamName,
     )
 
-    if (unread.length === 0) {
-      updatePollCadence(false)
-      return
-    }
-
-    updatePollCadence(true)
+    if (unread.length === 0) return
 
     logForDebugging(`[InboxPoller] Found ${unread.length} unread message(s)`)
 
@@ -914,10 +870,7 @@ export function useInboxPoller({
     setAppState,
     terminal,
     store,
-    updatePollCadence,
   ])
-  const pollRef = useRef(poll)
-  pollRef.current = poll
 
   // When session becomes idle, deliver any pending messages and clean up processed ones
   useEffect(() => {
@@ -998,91 +951,7 @@ export function useInboxPoller({
 
   // Poll if running as a teammate or as a team lead
   const shouldPoll = enabled && !!getAgentNameToPoll(store.getState())
-  const effectivePollIntervalMs = hasInboxWatcher
-    ? INBOX_FALLBACK_POLL_MS
-    : pollIntervalMs
-  useInterval(() => void poll(), shouldPoll ? effectivePollIntervalMs : null)
-
-  // Primary path: fs.watch inbox directory and trigger immediate polls on changes.
-  // Interval remains as low-frequency fallback in case watch misses events.
-  useEffect(() => {
-    if (!shouldPoll) {
-      setHasInboxWatcher(false)
-      return
-    }
-
-    const currentAppState = store.getState()
-    const agentName = getAgentNameToPoll(currentAppState)
-    if (!agentName) {
-      setHasInboxWatcher(false)
-      return
-    }
-
-    const inboxPath = getInboxPath(agentName, currentAppState.teamContext?.teamName)
-    const inboxDir = dirname(inboxPath)
-    const inboxFile = basename(inboxPath)
-
-    let watcher: FSWatcher | null = null
-    let closed = false
-    let debounceTimer: ReturnType<typeof setTimeout> | null = null
-
-    const schedulePoll = (): void => {
-      if (debounceTimer) {
-        clearTimeout(debounceTimer)
-      }
-      debounceTimer = setTimeout(() => {
-        if (closed) return
-        void pollRef.current()
-      }, INBOX_WATCH_DEBOUNCE_MS)
-    }
-
-    void mkdir(inboxDir, { recursive: true })
-      .then(() => {
-        if (closed) return
-        try {
-          watcher = watch(inboxDir, (_eventType, filename) => {
-            // Some platforms may emit null filename; treat as relevant.
-            if (!filename || filename === inboxFile) {
-              schedulePoll()
-            }
-          })
-          watcher.unref()
-          setHasInboxWatcher(true)
-          logForDebugging(
-            `[InboxPoller] Watching inbox file events in ${inboxDir} for ${inboxFile}`,
-          )
-        } catch (error) {
-          setHasInboxWatcher(false)
-          logForDebugging(`[InboxPoller] Failed to watch ${inboxDir}: ${error}`)
-        }
-      })
-      .catch(error => {
-        setHasInboxWatcher(false)
-        logForDebugging(
-          `[InboxPoller] Failed to prepare inbox watch dir ${inboxDir}: ${error}`,
-        )
-      })
-
-    return () => {
-      closed = true
-      setHasInboxWatcher(false)
-      if (debounceTimer) {
-        clearTimeout(debounceTimer)
-      }
-      if (watcher) {
-        watcher.close()
-      }
-    }
-  }, [shouldPoll, store])
-
-  // Reset cadence whenever polling is disabled (or role changes to non-polling).
-  useEffect(() => {
-    if (shouldPoll) return
-    consecutiveEmptyPollsRef.current = 0
-    if (pollIntervalMs !== INBOX_POLL_INTERVAL_MIN_MS) {
-      setPollIntervalMs(INBOX_POLL_INTERVAL_MIN_MS)
-    }
-  }, [shouldPoll, pollIntervalMs])
+  useInterval(() => void poll(), shouldPoll ? INBOX_POLL_INTERVAL_MS : null)
 
   // Initial poll on mount (only once)
   const hasDoneInitialPollRef = useRef(false)

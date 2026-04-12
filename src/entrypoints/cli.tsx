@@ -70,6 +70,49 @@ if (feature("ABLATION_BASELINE") && process.env.CLAUDE_CODE_ABLATION_BASELINE) {
 async function main(): Promise<void> {
     const args = process.argv.slice(2);
 
+    // Optional CPU profiling (signal-triggered). Send SIGUSR2 to capture a profile.
+    if (process.env.OPENCC_CPU_PROFILE_DISABLE !== "1") {
+        let running = false;
+        process.on("SIGUSR2", () => {
+            if (running) return;
+            running = true;
+            void (async () => {
+                try {
+                    const { Session } = await import("inspector");
+                    const { writeFile } = await import("fs/promises");
+                    const session = new Session();
+                    session.connect();
+
+                    const post = (method: string, params?: Record<string, unknown>) =>
+                        new Promise<any>((resolve, reject) => {
+                            session.post(method, params ?? {}, (err, result) => {
+                                if (err) reject(err);
+                                else resolve(result);
+                            });
+                        });
+
+                    const seconds = Math.max(
+                        1,
+                        Number(process.env.OPENCC_CPU_PROFILE_SECONDS ?? "10"),
+                    );
+                    await post("Profiler.enable");
+                    await post("Profiler.start");
+                    setTimeout(async () => {
+                        const result = await post("Profiler.stop");
+                        const outPath = `/tmp/opencc-cpuprofile-${process.pid}-${Date.now()}.cpuprofile`;
+                        await writeFile(outPath, JSON.stringify(result.profile));
+                        // biome-ignore lint/suspicious/noConsole:: debug hook
+                        console.error(`[cpu-profile] wrote ${outPath}`);
+                    }, seconds * 1000).unref?.();
+                } catch {
+                    // Swallow profiling errors to avoid impacting runtime.
+                } finally {
+                    running = false;
+                }
+            })();
+        });
+    }
+
     // Fast-path for --version/-v: zero module loading needed
     if (
         args.length === 1 &&
