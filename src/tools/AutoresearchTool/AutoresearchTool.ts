@@ -52,6 +52,14 @@ export const AutoresearchTool = buildTool({
   isReadOnly() {
     return false
   },
+  mapToolResultToToolResultBlockParam(output, toolUseID) {
+    return {
+      tool_use_id: toolUseID,
+      type: 'tool_result',
+      content: output.message,
+      is_error: !output.success,
+    }
+  },
   async call(input, context, canUseTool, parentMessage, onProgress) {
     const {
       goal,
