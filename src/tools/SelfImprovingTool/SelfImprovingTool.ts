@@ -7,6 +7,8 @@ import { buildTool, type ToolDef } from '../../Tool.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { zodToJsonSchema } from '../../utils/zodToJsonSchema.js'
 import { getCwd } from '../../utils/cwd.js'
+import { MemoryStore } from '../MemoryTool/MemoryStore.js'
+import { MEMORY_TYPES, type MemoryType } from '../../memdir/memoryTypes.js'
 
 const SELF_IMPROVING_TOOL_NAME = 'learn-tool'
 
@@ -25,9 +27,10 @@ const inputSchema = lazySchema(() =>
         'report',
         'learn',
         'ingest_memory',
+        'promote_memory',
       ])
       .describe(
-        'monitor initializes self-improving workspace; record logs one execution sample; analyze summarizes historical metrics; adjust generates PID-based parameter adjustments; predict forecasts performance; report returns recommendations; learn logs a learning/error/feature request entry; ingest_memory converts memory markdown docs into structured learnings.',
+        'monitor initializes self-improving workspace; record logs one execution sample; analyze summarizes historical metrics; adjust generates PID-based parameter adjustments; predict forecasts performance; report returns recommendations; learn logs a learning/error/feature request entry; ingest_memory converts memory markdown docs into structured learnings; promote_memory promotes validated learnings into long-term memory.',
       ),
     toolName: z
       .string()
@@ -95,6 +98,33 @@ const inputSchema = lazySchema(() =>
       .string()
       .optional()
       .describe('Used by action=ingest_memory: topic filter (default: cdp).'),
+    sourceFilePath: z
+      .string()
+      .optional()
+      .describe(
+        'Used by action=promote_memory: source markdown path (default: .learnings/LEARNINGS.md).',
+      ),
+    onlyVerified: z
+      .boolean()
+      .optional()
+      .describe(
+        'Used by action=promote_memory: only promote entries marked as validated/effective (default: true).',
+      ),
+    maxEntries: z
+      .number()
+      .int()
+      .min(1)
+      .max(200)
+      .optional()
+      .describe('Used by action=promote_memory: max promoted entries (default: 30).'),
+    dryRun: z
+      .boolean()
+      .optional()
+      .describe('Used by action=promote_memory: preview promotions without writing memory files.'),
+    memoryType: z
+      .enum(MEMORY_TYPES)
+      .optional()
+      .describe('Used by action=promote_memory: memory type to save (default: feedback).'),
   }),
 )
 
@@ -115,6 +145,7 @@ const outputSchema = lazySchema(() =>
       'report',
       'learn',
       'ingest_memory',
+      'promote_memory',
     ]),
     summary: z.string(),
     projectRoot: z.string(),
@@ -146,6 +177,9 @@ const outputSchema = lazySchema(() =>
     filesCreated: z.array(z.string()).optional(),
     loggedEntryId: z.string().optional(),
     importedCount: z.number().optional(),
+    promotedCount: z.number().optional(),
+    skippedCount: z.number().optional(),
+    dryRunPreview: z.array(z.string()).optional(),
   }),
 )
 
@@ -168,6 +202,15 @@ interface PerformanceRecord {
   executionTimeMs: number
   success: boolean
   error?: string
+}
+
+interface LearningEntry {
+  id: string
+  title: string
+  body: string
+  status: string
+  summary: string
+  details: string
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -827,6 +870,152 @@ async function runIngestMemory(projectRoot: string, input: Input): Promise<Outpu
   }
 }
 
+function parseLearningEntries(content: string): LearningEntry[] {
+  const headingRegex = /^## \[([^\]]+)\]\s+(.+)$/gm
+  const matches = Array.from(content.matchAll(headingRegex))
+  if (matches.length === 0) return []
+
+  const out: LearningEntry[] = []
+  for (let i = 0; i < matches.length; i += 1) {
+    const cur = matches[i]
+    const next = matches[i + 1]
+    const start = cur.index ?? 0
+    const end = next?.index ?? content.length
+    const block = content.slice(start, end).trim()
+    const status = (block.match(/\*\*Status\*\*:\s*([^\n]+)/i)?.[1] ?? '').trim()
+    const summary = (block.match(/### Summary\s*\n([\s\S]*?)\n### /i)?.[1] ?? '').trim()
+    const details = (block.match(/### Details\s*\n([\s\S]*?)(\n### |\n---|$)/i)?.[1] ?? '').trim()
+
+    out.push({
+      id: (cur[1] ?? '').trim(),
+      title: (cur[2] ?? '').trim(),
+      body: block,
+      status,
+      summary,
+      details,
+    })
+  }
+  return out
+}
+
+function isVerifiedEffective(entry: LearningEntry): boolean {
+  const text = `${entry.status}\n${entry.body}`.toLowerCase()
+  const hasNegative =
+    /(?:未验证|待验证|验证中|未生效|无效|invalid|unverified|pending)/i.test(text)
+  if (hasNegative) return false
+  return /(?:verified|validated|effective|accepted|adopted|stable|done|resolved|closed|已验证|验证通过|有效|已采用|已落地|稳定)/i.test(
+    text,
+  )
+}
+
+function normalizeTitle(text: string): string {
+  return text.trim().toLowerCase().replace(/\s+/g, ' ')
+}
+
+async function hasDuplicateMemory(
+  store: MemoryStore,
+  memoryType: MemoryType,
+  entry: LearningEntry,
+): Promise<boolean> {
+  const byId = await store.searchMemories(entry.id, memoryType, 10)
+  if (byId.some(m => m.content.includes(`[${entry.id}]`))) return true
+
+  const byTitle = await store.searchMemories(entry.title, memoryType, 10)
+  const target = normalizeTitle(entry.title)
+  return byTitle.some(m => normalizeTitle(m.name) === target)
+}
+
+async function runPromoteMemory(projectRoot: string, input: Input): Promise<Output> {
+  const sourceRel = input.sourceFilePath?.trim() || join(LEARNINGS_DIR, LEARNINGS_FILE)
+  const sourcePath = sourceRel.startsWith('/') ? sourceRel : join(projectRoot, sourceRel)
+  if (!(await exists(sourcePath))) {
+    return {
+      success: false,
+      action: 'promote_memory',
+      projectRoot,
+      summary: `sourceFilePath not found: ${sourcePath}`,
+      promotedCount: 0,
+      skippedCount: 0,
+    }
+  }
+
+  const raw = await readFile(sourcePath, 'utf-8')
+  const entries = parseLearningEntries(raw)
+  if (entries.length === 0) {
+    return {
+      success: false,
+      action: 'promote_memory',
+      projectRoot,
+      summary: `No learning entries found in ${sourcePath}.`,
+      promotedCount: 0,
+      skippedCount: 0,
+    }
+  }
+
+  const onlyVerified = input.onlyVerified ?? true
+  const maxEntries = input.maxEntries ?? 30
+  const dryRun = input.dryRun ?? false
+  const memoryType = (input.memoryType ?? 'feedback') as MemoryType
+  const store = new MemoryStore()
+
+  let promotedCount = 0
+  let skippedCount = 0
+  const dryRunPreview: string[] = []
+
+  for (const entry of entries) {
+    if (promotedCount >= maxEntries) break
+    if (onlyVerified && !isVerifiedEffective(entry)) {
+      skippedCount += 1
+      continue
+    }
+
+    if (await hasDuplicateMemory(store, memoryType, entry)) {
+      skippedCount += 1
+      continue
+    }
+
+    const description = `Promoted from .learnings [${entry.id}] into long-term memory.`
+    const content = [
+      `Source Entry: [${entry.id}] ${entry.title}`,
+      `Status: ${entry.status || 'unknown'}`,
+      '',
+      'Summary:',
+      entry.summary || entry.title,
+      '',
+      'Details:',
+      entry.details || '(no details)',
+      '',
+      `Source File: ${sourcePath}`,
+      'Source: learn-tool promote_memory',
+    ].join('\n')
+
+    if (dryRun) {
+      dryRunPreview.push(`[${entry.id}] ${entry.title}`)
+    } else {
+      await store.saveMemory(
+        memoryType,
+        entry.title,
+        description,
+        content,
+        ['self-improving', 'promoted-learning', entry.id.toLowerCase()],
+      )
+    }
+    promotedCount += 1
+  }
+
+  return {
+    success: promotedCount > 0,
+    action: 'promote_memory',
+    projectRoot,
+    summary: dryRun
+      ? `Dry-run complete: would promote ${promotedCount} entries (skipped ${skippedCount}) from ${sourcePath}.`
+      : `Promoted ${promotedCount} entries into MemoryTool store (skipped ${skippedCount}) from ${sourcePath}.`,
+    promotedCount,
+    skippedCount,
+    dryRunPreview: dryRun ? dryRunPreview : undefined,
+  }
+}
+
 export const SelfImprovingTool = buildTool({
   name: SELF_IMPROVING_TOOL_NAME,
   searchHint: 'self-improvement loop with metrics, prediction, adjustment, and learnings logs',
@@ -894,6 +1083,8 @@ export const SelfImprovingTool = buildTool({
         return { data: await runLearn(projectRoot, input) }
       case 'ingest_memory':
         return { data: await runIngestMemory(projectRoot, input) }
+      case 'promote_memory':
+        return { data: await runPromoteMemory(projectRoot, input) }
       default:
         return {
           data: {
@@ -914,6 +1105,22 @@ export const SelfImprovingTool = buildTool({
 
     if (output.loggedEntryId) {
       lines.push(`Entry ID: ${output.loggedEntryId}`)
+    }
+
+    if (typeof output.promotedCount === 'number') {
+      lines.push(`Promoted: ${output.promotedCount}`)
+    }
+    if (typeof output.skippedCount === 'number') {
+      lines.push(`Skipped: ${output.skippedCount}`)
+    }
+    if (output.dryRunPreview?.length) {
+      lines.push('DryRun Preview:')
+      for (const item of output.dryRunPreview.slice(0, 10)) {
+        lines.push(`- ${item}`)
+      }
+      if (output.dryRunPreview.length > 10) {
+        lines.push(`- ...and ${output.dryRunPreview.length - 10} more`)
+      }
     }
 
     if (output.adjustments?.length) {
