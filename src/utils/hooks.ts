@@ -181,6 +181,22 @@ export function getSessionEndHookTimeoutMs(): number {
     : SESSION_END_HOOK_TIMEOUT_MS_DEFAULT
 }
 
+/**
+ * Some plugin wrappers misuse exit code 2 (blocking) for internal runtime
+ * failures, which can brick UserPromptSubmit/Stop flows. Detect these cases
+ * and downgrade them to non-blocking errors.
+ */
+function isInfrastructureHookFailure(stderr: string, stdout: string): boolean {
+  const text = `${stderr}\n${stdout}`.toLowerCase()
+  return (
+    text.includes('hook error:') ||
+    text.includes('worker did not become ready') ||
+    text.includes('eaddrinuse') ||
+    text.includes('econnrefused') ||
+    text.includes('timed out waiting for worker')
+  )
+}
+
 function executeInBackground({
   processId,
   hookId,
@@ -2727,8 +2743,40 @@ async function* executeHooks({
         return
       }
 
-      // Hooks with exit code 2 provide blocking feedback
+      // Hooks with exit code 2 provide blocking feedback, except when the
+      // hook itself reports infrastructure/runtime failure.
       if (result.status === 2) {
+        if (isInfrastructureHookFailure(result.stderr, result.stdout)) {
+          emitHookResponse({
+            hookId,
+            hookName,
+            hookEvent,
+            output: result.output,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            exitCode: result.status,
+            outcome: 'error',
+          })
+          yield {
+            message: createAttachmentMessage({
+              type: 'hook_non_blocking_error',
+              hookName,
+              toolUseID,
+              hookEvent,
+              stderr:
+                result.stderr.trim() ||
+                'Hook reported an internal runtime failure',
+              stdout: result.stdout,
+              exitCode: result.status,
+              command: hookCommand,
+              durationMs,
+            }),
+            outcome: 'non_blocking_error' as const,
+            hook,
+          }
+          return
+        }
+
         emitHookResponse({
           hookId,
           hookName,
@@ -3410,14 +3458,18 @@ async function executeHooksOutsideREPL({
           )
         }
 
-        // Blocked if exit code 2 or JSON decision: 'block'
+        // Blocked if JSON decision says block, or exit code 2 without known
+        // infrastructure/runtime failure signatures.
         const typedJson = json as TypedSyncHookOutput | undefined
         const jsonBlocked =
           json &&
           !isAsyncHookJSONOutput(json) &&
           isSyncHookJSONOutput(json) &&
           typedJson?.decision === 'block'
-        const blocked = result.status === 2 || !!jsonBlocked
+        const blocked =
+          (result.status === 2 &&
+            !isInfrastructureHookFailure(result.stderr, result.stdout)) ||
+          !!jsonBlocked
 
         // For successful hooks (exit code 0), use stdout; for failed hooks, use stderr
         const output =
