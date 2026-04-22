@@ -18,8 +18,10 @@ import { Paper2CodeTool } from './tools/Paper2CodeTool/Paper2CodeTool.js'
 import { WikiTool } from './tools/WikiTool/WikiTool.js'
 import { KimiTool } from './tools/KimiTool/KimiTool.js'
 import { GeminiSubtitleTool } from './tools/GeminiSubtitleTool/GeminiSubtitleTool.js'
+import { MythosTool } from './tools/MythosTool/MythosTool.js'
 import { RedoTool } from './tools/RedoTool/RedoTool.js'
 import { SETool } from './tools/SETool/SETool.js'
+import { PMTool } from './tools/PMTool/PMTool.js'
 import { SelfImprovingTool } from './tools/SelfImprovingTool/SelfImprovingTool.js'
 // Dead code elimination: conditional import for ant-only tools
 /* eslint-disable custom-rules/no-process-env-top-level, @typescript-eslint/no-require-imports */
@@ -228,8 +230,10 @@ export function getAllBaseTools(): Tools {
     WikiTool,
     KimiTool,
     GeminiSubtitleTool,
+    MythosTool,
     RedoTool,
     SETool,
+    PMTool,
     SelfImprovingTool,
     EnterPlanModeTool,
     ...(process.env.USER_TYPE === 'ant' ? [ConfigTool] : []),
