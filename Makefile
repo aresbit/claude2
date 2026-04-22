@@ -2,6 +2,15 @@
 # Cross-platform Makefile supporting Linux, macOS, and Windows
 
 # ============================================================================
+# Termux Compatibility
+# ============================================================================
+
+# Termux sets PREFIX as a core environment variable. Prevent make from
+# exporting our install-prefix override back to child processes, which
+# breaks bun-termux and other tools that rely on the original PREFIX.
+unexport PREFIX
+
+# ============================================================================
 # Platform Detection
 # ============================================================================
 
@@ -382,3 +391,4 @@ ifneq ($(DETECTED_OS),Windows)
 $(DIST_DIR)/cli.js: $(TS_SOURCES) $(PACKAGE_FILES)
 	@$(MAKE) build
 endif
+
