@@ -1,12 +1,17 @@
 import { access, appendFile, mkdir, readFile, writeFile } from 'fs/promises'
 import { constants as fsConstants } from 'fs'
 import { join } from 'path'
+import { getAutoMemPath } from '../../memdir/paths.js'
 
 const PERFORMANCE_DATA_FILE = '.self_improving_performance.json'
 const EXPERIENCE_STATE_FILE = '.self_improving_experience.json'
 const LEARNINGS_DIR = '.learnings'
 const LEARNINGS_FILE = 'LEARNINGS.md'
 const SELF_IMPROVING_TOOL_NAME = 'learn-tool'
+
+function getLearnToolRoot(): string {
+  return join(getAutoMemPath(), '..', 'learn-tool')
+}
 
 type CaptureSample = {
   projectRoot: string
@@ -167,9 +172,11 @@ export async function capturePostToolUseSample(sample: CaptureSample): Promise<v
   if (sample.toolName === SELF_IMPROVING_TOOL_NAME) return
   if (!shouldTrackAsExperience(sample)) return
 
-  await ensureLearningFile(sample.projectRoot)
+  const storageRoot = getLearnToolRoot()
 
-  const data = await loadPerformance(sample.projectRoot)
+  await ensureLearningFile(storageRoot)
+
+  const data = await loadPerformance(storageRoot)
   const now = new Date().toISOString()
 
   const rec: PerformanceRecord = {
@@ -182,12 +189,12 @@ export async function capturePostToolUseSample(sample: CaptureSample): Promise<v
   }
 
   data.push(rec)
-  await savePerformance(sample.projectRoot, data)
+  await savePerformance(storageRoot, data)
 
   // Experience-oriented learning state (not per-call metric logging).
   const action = sample.action || 'call'
   const key = buildExperienceKey(sample.toolName, action, sample.contextSnippet)
-  const state = await loadExperienceState(sample.projectRoot)
+  const state = await loadExperienceState(storageRoot)
   const cur = state[key] ?? { callCount: 0, learned: false }
   cur.callCount += 1
   cur.bestMs =
@@ -198,7 +205,7 @@ export async function capturePostToolUseSample(sample: CaptureSample): Promise<v
   const isSlow =
     sample.success &&
     sample.durationMs >= slowThresholdMs(sample.toolName)
-  const learningsPath = join(sample.projectRoot, LEARNINGS_DIR, LEARNINGS_FILE)
+  const learningsPath = join(storageRoot, LEARNINGS_DIR, LEARNINGS_FILE)
   const snippet = normalizeSnippet(sample.contextSnippet)
 
   if (!cur.firstSlowAt && isSlow) {
@@ -266,5 +273,5 @@ export async function capturePostToolUseSample(sample: CaptureSample): Promise<v
   }
 
   state[key] = cur
-  await saveExperienceState(sample.projectRoot, state)
+  await saveExperienceState(storageRoot, state)
 }

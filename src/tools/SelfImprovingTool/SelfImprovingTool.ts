@@ -1,14 +1,13 @@
 import { access, appendFile, mkdir, readdir, readFile, writeFile } from 'fs/promises'
 import { constants as fsConstants } from 'fs'
 import { join } from 'path'
-import { homedir } from 'os'
 import { z } from 'zod/v4'
 import { buildTool, type ToolDef } from '../../Tool.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { zodToJsonSchema } from '../../utils/zodToJsonSchema.js'
-import { getCwd } from '../../utils/cwd.js'
 import { MemoryStore } from '../MemoryTool/MemoryStore.js'
 import { MEMORY_TYPES, type MemoryType } from '../../memdir/memoryTypes.js'
+import { getAutoMemPath } from '../../memdir/paths.js'
 
 const SELF_IMPROVING_TOOL_NAME = 'learn-tool'
 
@@ -239,19 +238,12 @@ function fingerprint(text: string): string {
   return (h >>> 0).toString(16)
 }
 
-function encodeProjectPathForClaudeProjects(projectRoot: string): string {
-  // /home/ares/yyscode/opencc -> -home-ares-yyscode-opencc
-  return projectRoot.replace(/[\\/]+/g, '-')
+function getLearnToolRoot(): string {
+  return join(getAutoMemPath(), '..', 'learn-tool')
 }
 
-function getDefaultMemoryDirFromProjectRoot(projectRoot: string): string {
-  return join(
-    homedir(),
-    '.claude',
-    'projects',
-    encodeProjectPathForClaudeProjects(projectRoot),
-    'memory',
-  )
+function getDefaultMemoryDir(): string {
+  return getAutoMemPath()
 }
 
 function nextId(prefix: 'LRN' | 'ERR' | 'FEAT', existing: string, iso: string): string {
@@ -779,9 +771,9 @@ async function runIngestMemory(projectRoot: string, input: Input): Promise<Outpu
   let consideredCount = 0
   let skippedCount = 0
 
-  // Default source: ~/.claude/projects/<encoded-project-root>/memory/*.md
+  // Default source: the same auto-memory directory used by MemoryTool.
   if (filePaths.length === 0) {
-    const defaultMemoryDir = getDefaultMemoryDirFromProjectRoot(projectRoot)
+    const defaultMemoryDir = getDefaultMemoryDir()
     if (await exists(defaultMemoryDir)) {
       const entries = await readdir(defaultMemoryDir, { withFileTypes: true })
       const allMd = entries
@@ -808,7 +800,7 @@ async function runIngestMemory(projectRoot: string, input: Input): Promise<Outpu
       action: 'ingest_memory',
       projectRoot,
       summary:
-        'No memory markdown files found. Provide memoryFilePaths or ensure ~/.claude/projects/<encoded-project>/memory contains .md files.',
+        'No memory markdown files found. Provide memoryFilePaths or ensure ~/.claude/projects/<project>/memory contains .md files.',
       importedCount: 0,
     }
   }
@@ -1050,7 +1042,7 @@ export const SelfImprovingTool = buildTool({
     return `${input.action}:${input.toolName ?? 'all'}`
   },
   async call(input: Input) {
-    const projectRoot = getCwd()
+    const projectRoot = getLearnToolRoot()
 
     switch (input.action) {
       case 'monitor':
