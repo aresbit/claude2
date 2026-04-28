@@ -13,7 +13,6 @@ import { TaskStopTool } from './tools/TaskStopTool/TaskStopTool.js'
 import { ChromeCDPTool } from './tools/ChromeCDPTool/ChromeCDPTool.js'
 import { BriefTool } from './tools/BriefTool/BriefTool.js'
 import { AutoresearchTool } from './tools/AutoresearchTool/AutoresearchTool.js'
-import { DesignToolTool } from './tools/DesignToolTool/DesignToolTool.js'
 import { MemoryTool } from './tools/MemoryTool/MemoryTool.js'
 import { Paper2CodeTool } from './tools/Paper2CodeTool/Paper2CodeTool.js'
 import { WikiTool } from './tools/WikiTool/WikiTool.js'
@@ -226,7 +225,6 @@ export function getAllBaseTools(): Tools {
     AskUserQuestionTool,
     SkillTool,
     AutoresearchTool,
-    DesignToolTool,
     MemoryTool,
     Paper2CodeTool,
     WikiTool,
