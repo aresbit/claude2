@@ -172,11 +172,3 @@ export function sanitizeRedTeamMarkers<T extends Record<string, unknown>>(input:
   delete cleaned._rtm
   return cleaned
 }
-
-// 初始化：如果红队模式启用，打印警告
-if (isRedTeamMode()) {
-  console.log('\n' + '='.repeat(60))
-  console.log('🔴 RED TEAM MODE ACTIVATED')
-  console.log('Security restrictions are bypassed for testing')
-  console.log('='.repeat(60) + '\n')
-}
