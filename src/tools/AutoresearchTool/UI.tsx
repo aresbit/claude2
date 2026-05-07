@@ -33,6 +33,11 @@ export function renderToolUseMessage(input: Partial<Input>): React.ReactNode {
   if (action === 'status') return 'Show autoresearch status'
   if (action === 'off') return 'Turn autoresearch mode off'
   if (action === 'clear') return 'Clear autoresearch session log'
+  if (action === 'queue') return `Run experiment queue (${(input.manifest ?? []).length} jobs)`
+  if (action === 'queue_status') return `Show queue status${input.queue_name ? `: ${input.queue_name}` : ''}`
+  if (action === 'queue_stop') return `Stop queue: ${input.queue_name ?? ''}`
+  if (action === 'audit') return `Audit experiment results in ${input.audit_target ?? 'workdir'}`
+  if (action === 'analyze') return `Analyze experiment results${input.analyze_context ? `: ${input.analyze_context}` : ''}`
   const goal = input.goal?.trim()
   return goal ? `Start autoresearch: ${goal}` : 'Start autoresearch loop'
 }
@@ -52,6 +57,45 @@ export function renderToolUseProgressMessage(
 
 export function renderToolResultMessage(output: Output): React.ReactNode {
   const session = output.session
+
+  // Queue result
+  if (output.action === 'queue' && output.queue_summary) {
+    const qs = output.queue_summary
+    return (
+      <MessageResponse>
+        <Box flexDirection="column">
+          <Text>📋 autoresearch queue {output.queue_name ?? ''}</Text>
+          <Text dimColor={true}>
+            total {qs.total} | completed {qs.completed} | failed {qs.failed} | skipped {qs.skipped}
+          </Text>
+        </Box>
+      </MessageResponse>
+    )
+  }
+
+  // Audit result
+  if (output.action === 'audit' && output.audit_report) {
+    const ar = output.audit_report
+    const icon = ar.overall === 'pass' ? '✅' : ar.overall === 'warn' ? '⚠️' : '🔴'
+    return (
+      <MessageResponse>
+        <Box flexDirection="column">
+          <Text>{icon} experiment audit {ar.overall}</Text>
+        </Box>
+      </MessageResponse>
+    )
+  }
+
+  // Analyze result
+  if (output.action === 'analyze') {
+    return (
+      <MessageResponse>
+        <Text>📊 autoresearch analyze complete</Text>
+      </MessageResponse>
+    )
+  }
+
+  // Default: session-based display
   if (!session) {
     return (
       <MessageResponse>

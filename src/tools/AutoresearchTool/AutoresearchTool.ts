@@ -28,6 +28,11 @@ const inputSchema = lazySchema(() =>
         'init_experiment',
         'run_experiment',
         'log_experiment',
+        'queue',
+        'queue_status',
+        'queue_stop',
+        'audit',
+        'analyze',
       ])
       .optional()
       .describe('Action to perform. Default: start'),
@@ -91,6 +96,51 @@ const inputSchema = lazySchema(() =>
       .max(100)
       .optional()
       .describe('Auto-stop threshold: stop loop after N consecutive non-keep results'),
+    // --- queue action fields ---
+    manifest: z
+      .array(
+        z.object({
+          id: z.string().describe('Unique job identifier'),
+          command: z.string().describe('Shell command to run for this job'),
+          cwd: z.string().optional().describe('Working directory override for this job'),
+          timeoutMs: z.number().int().positive().optional().describe('Per-job timeout in ms'),
+          depends_on: z.array(z.string()).optional().describe('Job IDs that must succeed before this starts'),
+          retry: z
+            .object({
+              max_attempts: z.number().int().positive().optional(),
+              delay_ms: z.number().int().nonnegative().optional(),
+            })
+            .optional()
+            .describe('Retry policy on failure'),
+        }),
+      )
+      .optional()
+      .describe('Job manifest for queue action (array of job definitions)'),
+    max_parallel: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe('Max concurrent jobs for queue action'),
+    queue_name: z.string().optional().describe('Queue name for queue_status / queue_stop'),
+    // --- audit action fields ---
+    audit_target: z
+      .string()
+      .optional()
+      .describe('Audit target: workdir path for experiment audit'),
+    expected_metrics: z
+      .array(z.string())
+      .optional()
+      .describe('Expected metric names for audit verification'),
+    // --- analyze action fields ---
+    analyze_context: z
+      .string()
+      .optional()
+      .describe('Context/question for result analysis'),
+    group_by: z
+      .string()
+      .optional()
+      .describe('Grouping key for analyze (e.g., "run", "segment", "status")'),
   }),
 )
 type InputSchema = ReturnType<typeof inputSchema>
@@ -116,6 +166,16 @@ const sessionSchema = z.object({
   stopReason: z.string().optional(),
 })
 
+const jobStatusSchema = z.object({
+  id: z.string(),
+  status: z.enum(['pending', 'running', 'completed', 'failed', 'skipped']),
+  command: z.string(),
+  exitCode: z.number().optional(),
+  durationMs: z.number().optional(),
+  error: z.string().optional(),
+  attempts: z.number().optional(),
+})
+
 const outputSchema = lazySchema(() =>
   z.object({
     success: z.boolean().describe('Whether the autoresearch action succeeded'),
@@ -131,10 +191,41 @@ const outputSchema = lazySchema(() =>
         'init_experiment',
         'run_experiment',
         'log_experiment',
+        'queue',
+        'queue_status',
+        'queue_stop',
+        'audit',
+        'analyze',
       ])
       .describe('Executed action'),
     message: z.string().describe('Status message'),
     session: sessionSchema.optional(),
+    // queue output fields
+    queue_name: z.string().optional(),
+    queue_summary: z
+      .object({
+        total: z.number(),
+        pending: z.number(),
+        running: z.number(),
+        completed: z.number(),
+        failed: z.number(),
+        skipped: z.number(),
+        wallClockMs: z.number().optional(),
+      })
+      .optional(),
+    jobs: z.array(jobStatusSchema).optional(),
+    // audit output fields
+    audit_report: z
+      .object({
+        checks: z.record(z.string(), z.unknown()),
+        overall: z.enum(['pass', 'warn', 'fail']),
+        details: z.string().optional(),
+      })
+      .optional(),
+    // analyze output fields
+    analysis: z
+      .record(z.string(), z.unknown())
+      .optional(),
   }),
 )
 type OutputSchema = ReturnType<typeof outputSchema>
@@ -160,6 +251,59 @@ type SessionMode = 'active' | 'inactive'
 type ExperimentStatus = 'keep' | 'discard' | 'crash' | 'checks_failed'
 type MetricDirection = 'lower' | 'higher'
 type AutoresearchAction = NonNullable<Input['action']>
+
+// --- Queue types (ported from ARIS experiment-queue) ---
+interface QueueJob {
+  id: string
+  command: string
+  cwd?: string
+  timeoutMs?: number
+  depends_on?: string[]
+  retry?: { max_attempts?: number; delay_ms?: number }
+}
+
+interface QueueJobState {
+  id: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
+  command: string
+  exitCode?: number
+  durationMs?: number
+  error?: string
+  attempts: number
+  startedAt?: string
+  completedAt?: string
+}
+
+interface QueueRuntime {
+  name: string
+  createdAt: string
+  updatedAt: string
+  maxParallel: number
+  jobs: QueueJobState[]
+  wallClockStart?: string
+  wallClockEnd?: string
+}
+
+// --- Audit types (ported from ARIS experiment-audit) ---
+interface AuditCheckResult {
+  status: 'pass' | 'warn' | 'fail'
+  details: string
+}
+
+interface AuditReport {
+  overall: 'pass' | 'warn' | 'fail'
+  checks: Record<string, AuditCheckResult>
+  details?: string
+}
+
+// --- Analyze types (ported from ARIS analyze-results) ---
+interface AnalyzeStats {
+  total: number
+  byStatus: Record<string, number>
+  metricRange?: { min: number; max: number; avg: number; last: number }
+  topPerforming?: { run: number; metric: number; description: string }
+  trends?: string[]
+}
 
 interface RuntimeState {
   mode: SessionMode
@@ -1098,16 +1242,679 @@ async function handleLogExperiment(
   }
 }
 
+// =============================================================================
+// Feature: Experiment Queue (ported from ARIS experiment-queue)
+// =============================================================================
+
+const QUEUE_DIR = '.autoresearch_queues'
+const DEFAULT_MAX_PARALLEL = 4
+const DEFAULT_RETRY_MAX = 2
+const DEFAULT_RETRY_DELAY_MS = 10_000
+
+function queueStatePath(workDir: string, name: string): string {
+  return join(workDir, QUEUE_DIR, `${name}.json`)
+}
+
+async function ensureQueueDir(workDir: string): Promise<void> {
+  const dir = join(workDir, QUEUE_DIR)
+  if (!(await exists(dir))) {
+    const { mkdir } = await import('fs/promises')
+    await mkdir(dir, { recursive: true })
+  }
+}
+
+async function readQueueState(workDir: string, name: string): Promise<QueueRuntime | null> {
+  const p = queueStatePath(workDir, name)
+  if (!(await exists(p))) return null
+  try {
+    const raw = await readFile(p, 'utf-8')
+    return JSON.parse(raw) as QueueRuntime
+  } catch {
+    return null
+  }
+}
+
+async function writeQueueState(workDir: string, state: QueueRuntime): Promise<void> {
+  await ensureQueueDir(workDir)
+  await writeFile(queueStatePath(workDir, state.name), JSON.stringify(state, null, 2), 'utf-8')
+}
+
+function generateQueueName(): string {
+  return `queue_${Date.now()}`
+}
+
+/**
+ * Determine which jobs in a queue are eligible to run (dependencies met).
+ */
+function getRunnableJobs(jobs: QueueJobState[], maxParallel: number): QueueJobState[] {
+  const running = jobs.filter(j => j.status === 'running').length
+  const available = maxParallel - running
+  if (available <= 0) return []
+
+  const completedIds = new Set(jobs.filter(j => j.status === 'completed').map(j => j.id))
+
+  return jobs
+    .filter(
+      j =>
+        j.status === 'pending' &&
+        (!j.attempts || j.attempts === 0) &&
+        (!j.depends_on || (j.depends_on as string[]).every(d => completedIds.has(d))),
+    )
+    .slice(0, available)
+}
+
+async function handleQueueAction(
+  input: Input,
+  workDir: string,
+  contextAbortSignal: AbortSignal,
+): Promise<Output> {
+  const manifest = input.manifest
+  if (!manifest || !Array.isArray(manifest) || manifest.length === 0) {
+    return {
+      success: false,
+      mode: 'inactive',
+      action: 'queue',
+      message: 'queue action requires a non-empty manifest array.',
+    }
+  }
+
+  const maxParallel = input.max_parallel ?? DEFAULT_MAX_PARALLEL
+  const queueName = generateQueueName()
+
+  // Build initial job states
+  const jobStates: QueueJobState[] = manifest.map((job: QueueJob) => ({
+    id: job.id,
+    status: 'pending' as const,
+    command: job.command,
+    attempts: 0,
+    depends_on: job.depends_on,
+  }))
+
+  const queueState: QueueRuntime = {
+    name: queueName,
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+    maxParallel,
+    jobs: jobStates,
+    wallClockStart: nowIso(),
+  }
+
+  await writeQueueState(workDir, queueState)
+
+  // Run loop: pick runnable jobs, execute sequentially in batches
+  let allDone = false
+  while (!allDone && !contextAbortSignal.aborted) {
+    const current = await readQueueState(workDir, queueName)
+    if (!current) break
+
+    const runnable = getRunnableJobs(current.jobs, maxParallel)
+    if (runnable.length === 0) {
+      // Check if all jobs are in terminal state
+      const terminal = current.jobs.filter(
+        j => j.status === 'completed' || j.status === 'failed' || j.status === 'skipped',
+      )
+      if (terminal.length === current.jobs.length) {
+        allDone = true
+        break
+      }
+      // Wait a bit before re-checking
+      await new Promise(resolve => setTimeout(resolve, 1000))
+      continue
+    }
+
+    // Execute runnable jobs
+    for (const job of runnable) {
+      if (contextAbortSignal.aborted) break
+
+      // Mark running
+      const idx = current.jobs.findIndex(j => j.id === job.id)
+      if (idx === -1) continue
+      current.jobs[idx] = {
+        ...current.jobs[idx],
+        status: 'running',
+        startedAt: nowIso(),
+        attempts: current.jobs[idx].attempts + 1,
+      }
+      await writeQueueState(workDir, current)
+
+      // Find the job definition for retry config
+      const jobDef = manifest.find((m: QueueJob) => m.id === job.id)
+      const maxAttempts = jobDef?.retry?.max_attempts ?? DEFAULT_RETRY_MAX
+      const retryDelayMs = jobDef?.retry?.delay_ms ?? DEFAULT_RETRY_DELAY_MS
+
+      // Execute the job with retry
+      let lastError = ''
+      let success = false
+      let exitCode = -1
+      let durationMs = 0
+
+      for (let attempt = 1; attempt <= Math.max(maxAttempts, 1); attempt++) {
+        if (contextAbortSignal.aborted) break
+
+        const jobWorkDir = jobDef?.cwd ?? workDir
+        const cmd = `cd ${shQuote(jobWorkDir)} && ${job.command}`
+        const timeout = jobDef?.timeoutMs ?? 5 * 60 * 1000
+
+        try {
+          const t0 = Date.now()
+          const shellResult = await exec(cmd, contextAbortSignal, 'bash', {
+            timeout,
+            preventCwdChanges: true,
+          })
+          const result = await shellResult.result
+          shellResult.cleanup()
+          durationMs = Date.now() - t0
+
+          if (result.code === 0 && !result.interrupted) {
+            success = true
+            exitCode = 0
+            break
+          } else {
+            lastError = `exit=${result.code}, interrupted=${result.interrupted}`
+            exitCode = result.code ?? -1
+            if (attempt < maxAttempts) {
+              await new Promise(resolve => setTimeout(resolve, retryDelayMs))
+            }
+          }
+        } catch (err) {
+          durationMs = Date.now() - Date.now()
+          lastError = jsonErrorMessage(err)
+          if (attempt < maxAttempts) {
+            await new Promise(resolve => setTimeout(resolve, retryDelayMs))
+          }
+        }
+      }
+
+      // Update job state
+      const finalIdx = current.jobs.findIndex(j => j.id === job.id)
+      if (finalIdx !== -1) {
+        current.jobs[finalIdx] = {
+          ...current.jobs[finalIdx],
+          status: success ? 'completed' : 'failed',
+          exitCode,
+          durationMs,
+          error: success ? undefined : lastError,
+          completedAt: nowIso(),
+          attempts: current.jobs[finalIdx].attempts,
+        }
+      }
+
+      // Check dependencies: if job failed, skip dependent jobs
+      if (!success) {
+        const dependentIds = current.jobs
+          .filter(j => j.depends_on?.includes(job.id))
+          .map(j => j.id)
+        for (const depId of dependentIds) {
+          const depIdx = current.jobs.findIndex(j => j.id === depId)
+          if (depIdx !== -1 && current.jobs[depIdx].status === 'pending') {
+            current.jobs[depIdx] = {
+              ...current.jobs[depIdx],
+              status: 'skipped',
+              error: `Dependency failed: ${job.id}`,
+              completedAt: nowIso(),
+            }
+          }
+        }
+      }
+
+      await writeQueueState(workDir, current)
+    }
+  }
+
+  // Compute final summary
+  const finalState = await readQueueState(workDir, queueName)
+  const jobs = finalState?.jobs ?? jobStates
+  const total = jobs.length
+  const completed = jobs.filter(j => j.status === 'completed').length
+  const failed = jobs.filter(j => j.status === 'failed').length
+  const skipped = jobs.filter(j => j.status === 'skipped').length
+  const running = jobs.filter(j => j.status === 'running').length
+  const pending = jobs.filter(j => j.status === 'pending').length
+
+  const summaryStr =
+    `Queue ${queueName}: ${total} jobs (completed=${completed}, failed=${failed}, skipped=${skipped}, running=${running}, pending=${pending})`
+
+  return {
+    success: failed === 0 && running === 0 && pending === 0,
+    mode: 'inactive',
+    action: 'queue',
+    message: `Experiment queue finished.\n${summaryStr}`,
+    queue_name: queueName,
+    queue_summary: {
+      total,
+      pending,
+      running,
+      completed,
+      failed,
+      skipped,
+    },
+    jobs: jobs.map(j => ({
+      id: j.id,
+      status: j.status,
+      command: j.command,
+      exitCode: j.exitCode,
+      durationMs: j.durationMs,
+      error: j.error,
+      attempts: j.attempts,
+    })),
+  }
+}
+
+async function handleQueueStatus(
+  input: Input,
+  workDir: string,
+): Promise<Output> {
+  const queueName = input.queue_name
+  if (!queueName) {
+    // List all queues
+    const queueDir = join(workDir, QUEUE_DIR)
+    if (!(await exists(queueDir))) {
+      return {
+        success: true,
+        mode: 'inactive',
+        action: 'queue_status',
+        message: 'No queues found.',
+      }
+    }
+    const { readdir } = await import('fs/promises')
+    const files = await readdir(queueDir)
+    const queues = files.filter(f => f.endsWith('.json')).map(f => f.replace(/\.json$/, ''))
+    if (queues.length === 0) {
+      return {
+        success: true,
+        mode: 'inactive',
+        action: 'queue_status',
+        message: 'No queues found.',
+      }
+    }
+    const summaries: string[] = []
+    for (const q of queues) {
+      const state = await readQueueState(workDir, q)
+      if (!state) continue
+      const total = state.jobs.length
+      const done = state.jobs.filter(j => j.status === 'completed').length
+      const fail = state.jobs.filter(j => j.status === 'failed').length
+      summaries.push(`${q}: ${done}/${total} done, ${fail} failed`)
+    }
+    return {
+      success: true,
+      mode: 'inactive',
+      action: 'queue_status',
+      message: `Queues:\n${summaries.join('\n')}`,
+      queue_name: `(${queues.length} queues)`,
+    }
+  }
+
+  const state = await readQueueState(workDir, queueName)
+  if (!state) {
+    return {
+      success: false,
+      mode: 'inactive',
+      action: 'queue_status',
+      message: `Queue not found: ${queueName}`,
+      queue_name: queueName,
+    }
+  }
+
+  const total = state.jobs.length
+  const completed = state.jobs.filter(j => j.status === 'completed').length
+  const failed = state.jobs.filter(j => j.status === 'failed').length
+  const skipped = state.jobs.filter(j => j.status === 'skipped').length
+  const running = state.jobs.filter(j => j.status === 'running').length
+  const pending = state.jobs.filter(j => j.status === 'pending').length
+
+  return {
+    success: true,
+    mode: running > 0 ? 'active' : 'inactive',
+    action: 'queue_status',
+    message: `Queue ${queueName}: ${total} jobs (completed=${completed}, failed=${failed}, skipped=${skipped}, running=${running}, pending=${pending})`,
+    queue_name: queueName,
+    queue_summary: { total, pending, running, completed, failed, skipped },
+    jobs: state.jobs.map(j => ({
+      id: j.id,
+      status: j.status,
+      command: j.command,
+      exitCode: j.exitCode,
+      durationMs: j.durationMs,
+      error: j.error,
+      attempts: j.attempts,
+    })),
+  }
+}
+
+async function handleQueueStop(
+  input: Input,
+  workDir: string,
+): Promise<Output> {
+  const queueName = input.queue_name
+  if (!queueName) {
+    return {
+      success: false,
+      mode: 'inactive',
+      action: 'queue_stop',
+      message: 'queue_stop requires queue_name.',
+    }
+  }
+
+  const state = await readQueueState(workDir, queueName)
+  if (!state) {
+    return {
+      success: false,
+      mode: 'inactive',
+      action: 'queue_stop',
+      message: `Queue not found: ${queueName}`,
+      queue_name: queueName,
+    }
+  }
+
+  // Mark running jobs as failed
+  for (const job of state.jobs) {
+    if (job.status === 'running' || job.status === 'pending') {
+      job.status = 'failed'
+      job.error = 'Queue stopped by user'
+      job.completedAt = nowIso()
+    }
+  }
+  state.wallClockEnd = nowIso()
+  state.updatedAt = nowIso()
+  await writeQueueState(workDir, state)
+
+  return {
+    success: true,
+    mode: 'inactive',
+    action: 'queue_stop',
+    message: `Queue ${queueName} stopped.`,
+    queue_name: queueName,
+  }
+}
+
+// =============================================================================
+// Feature: Experiment Audit (ported from ARIS experiment-audit)
+// =============================================================================
+
+async function handleAuditAction(
+  input: Input,
+  workDir: string,
+): Promise<Output> {
+  const jsonlPath = join(workDir, AUTORESEARCH_JSONL)
+  if (!(await exists(jsonlPath))) {
+    return {
+      success: false,
+      mode: 'inactive',
+      action: 'audit',
+      message: `No ${AUTORESEARCH_JSONL} found in ${workDir}. Run some experiments first.`,
+    }
+  }
+
+  const expectedMetrics = input.expected_metrics ?? []
+  const checks: Record<string, AuditCheckResult> = {}
+
+  // Check 1: JSONL file integrity
+  try {
+    const raw = await readFile(jsonlPath, 'utf-8')
+    const lines = raw.split('\n').filter(Boolean)
+    let parseErrors = 0
+    let configCount = 0
+    let runCount = 0
+    const metricValues: number[] = []
+    const uniqueMetricNames = new Set<string>()
+
+    for (const line of lines) {
+      try {
+        const rec = JSON.parse(line) as Record<string, unknown>
+        if (rec.type === 'config') {
+          configCount++
+          if (typeof rec.metricName === 'string') uniqueMetricNames.add(rec.metricName)
+        } else if (rec.type === 'run') {
+          runCount++
+          if (typeof rec.metric === 'number' && Number.isFinite(rec.metric)) {
+            metricValues.push(rec.metric as number)
+          }
+        }
+      } catch {
+        parseErrors++
+      }
+    }
+
+    const details = `${lines.length} lines, ${configCount} configs, ${runCount} runs, ${parseErrors} parse errors`
+    checks.jsonl_integrity = {
+      status: parseErrors === 0 && runCount > 0 ? 'pass' : parseErrors > 0 ? 'warn' : 'fail',
+      details,
+    }
+
+    // Check 2: Metric consistency
+    if (metricValues.length > 0) {
+      const min = Math.min(...metricValues)
+      const max = Math.max(...metricValues)
+      const avg = metricValues.reduce((a, b) => a + b, 0) / metricValues.length
+      const variances = metricValues.map(v => (v - avg) ** 2)
+      const stdDev = Math.sqrt(variances.reduce((a, b) => a + b, 0) / variances.length)
+      const cv = avg !== 0 ? stdDev / avg : 0
+
+      checks.metric_consistency = {
+        status: cv < 2 ? 'pass' : cv < 5 ? 'warn' : 'fail',
+        details: `${metricValues.length} metrics: min=${min}, max=${max}, avg=${avg.toFixed(4)}, std=${stdDev.toFixed(4)}, cv=${cv.toFixed(4)}`,
+      }
+    } else {
+      checks.metric_consistency = {
+        status: 'warn',
+        details: 'No numeric metric values found in run records.',
+      }
+    }
+
+    // Check 3: Expected metrics presence
+    if (expectedMetrics.length > 0) {
+      const found = expectedMetrics.filter(m => uniqueMetricNames.has(m))
+      const missing = expectedMetrics.filter(m => !uniqueMetricNames.has(m))
+      checks.expected_metrics = {
+        status: missing.length === 0 ? 'pass' : 'warn',
+        details: `Expected: ${expectedMetrics.join(', ')}. Found: ${found.join(', ')}. Missing: ${missing.join(', ') || 'none'}.`,
+      }
+    }
+
+    // Check 4: Status distribution
+    const statusCounts: Record<string, number> = {}
+    for (const line of lines) {
+      try {
+        const rec = JSON.parse(line) as Record<string, unknown>
+        if (rec.type === 'run' && typeof rec.status === 'string') {
+          statusCounts[rec.status as string] = (statusCounts[rec.status as string] || 0) + 1
+        }
+      } catch {
+        // skip
+      }
+    }
+    const keepRate = statusCounts['keep'] ? (statusCounts['keep'] / runCount) * 100 : 0
+    checks.status_distribution = {
+      status: keepRate >= 10 ? 'pass' : runCount > 0 ? 'warn' : 'fail',
+      details: `Statuses: ${JSON.stringify(statusCounts)}. Keep rate: ${keepRate.toFixed(1)}%`,
+    }
+  } catch (err) {
+    checks.jsonl_integrity = {
+      status: 'fail',
+      details: `Failed to read/parse ${AUTORESEARCH_JSONL}: ${jsonErrorMessage(err)}`,
+    }
+  }
+
+  const checkValues = Object.values(checks)
+  const failCount = checkValues.filter(c => c.status === 'fail').length
+  const warnCount = checkValues.filter(c => c.status === 'warn').length
+  const overall: 'pass' | 'warn' | 'fail' =
+    failCount > 0 ? 'fail' : warnCount > 0 ? 'warn' : 'pass'
+
+  const detailsStr = Object.entries(checks)
+    .map(([name, c]) => `  ${name}: ${c.status} — ${c.details}`)
+    .join('\n')
+
+  return {
+    success: true,
+    mode: 'inactive',
+    action: 'audit',
+    message: `Experiment audit ${overall}.\n${detailsStr}`,
+    audit_report: {
+      overall,
+      checks: checks as unknown as Record<string, unknown>,
+      details: detailsStr,
+    },
+  }
+}
+
+// =============================================================================
+// Feature: Analyze Results (ported from ARIS analyze-results)
+// =============================================================================
+
+async function handleAnalyzeAction(
+  input: Input,
+  workDir: string,
+): Promise<Output> {
+  const jsonlPath = join(workDir, AUTORESEARCH_JSONL)
+  if (!(await exists(jsonlPath))) {
+    return {
+      success: false,
+      mode: 'inactive',
+      action: 'analyze',
+      message: `No ${AUTORESEARCH_JSONL} found in ${workDir}. Run some experiments first.`,
+    }
+  }
+
+  const raw = await readFile(jsonlPath, 'utf-8')
+  const lines = raw.split('\n').filter(Boolean)
+
+  // Parse config
+  let configMetricName = 'metric'
+  let configDirection: string | undefined
+  for (const line of lines) {
+    try {
+      const rec = JSON.parse(line) as Record<string, unknown>
+      if (rec.type === 'config' && typeof rec.metricName === 'string') {
+        configMetricName = rec.metricName
+        configDirection = typeof rec.direction === 'string' ? (rec.direction as string) : undefined
+      }
+    } catch {
+      // skip
+    }
+  }
+
+  // Parse runs
+  const runs: Array<{
+    run: number
+    segment: number
+    status: string
+    metric: number | undefined
+    description: string
+    durationSeconds: number | undefined
+  }> = []
+
+  for (const line of lines) {
+    try {
+      const rec = JSON.parse(line) as Record<string, unknown>
+      if (rec.type === 'run') {
+        runs.push({
+          run: typeof rec.run === 'number' ? (rec.run as number) : 0,
+          segment: typeof rec.segment === 'number' ? (rec.segment as number) : 0,
+          status: typeof rec.status === 'string' ? (rec.status as string) : 'unknown',
+          metric: typeof rec.metric === 'number' ? (rec.metric as number) : undefined,
+          description: typeof rec.description === 'string' ? (rec.description as string) : '',
+          durationSeconds: typeof rec.durationSeconds === 'number' ? (rec.durationSeconds as number) : undefined,
+        })
+      }
+    } catch {
+      // skip
+    }
+  }
+
+  if (runs.length === 0) {
+    return {
+      success: false,
+      mode: 'inactive',
+      action: 'analyze',
+      message: 'No run records found in experiment log.',
+    }
+  }
+
+  // Compute statistics
+  const byStatus: Record<string, number> = {}
+  const metricValues: number[] = []
+  let topRun: { run: number; metric: number; description: string } | undefined
+
+  for (const r of runs) {
+    byStatus[r.status] = (byStatus[r.status] || 0) + 1
+    if (typeof r.metric === 'number') {
+      metricValues.push(r.metric)
+      if (!topRun || r.metric > topRun.metric) {
+        topRun = { run: r.run, metric: r.metric, description: r.description }
+      }
+    }
+  }
+
+  const metricRange = metricValues.length > 0
+    ? {
+        min: Math.min(...metricValues),
+        max: Math.max(...metricValues),
+        avg: metricValues.reduce((a, b) => a + b, 0) / metricValues.length,
+        last: metricValues[metricValues.length - 1],
+      }
+    : undefined
+
+  const groupByKey = input.group_by ?? 'status'
+  const groups: Record<string, number> = {}
+  for (const r of runs) {
+    const key = groupByKey === 'segment' ? `segment_${r.segment}` : r.status
+    groups[key] = (groups[key] || 0) + 1
+  }
+
+  // Generate trends
+  const trends: string[] = []
+  const keepRuns = runs.filter(r => r.status === 'keep')
+  const improveRuns = keepRuns.length >= 2 ? keepRuns : []
+  if (improveRuns.length >= 2) {
+    const first = improveRuns[0].metric ?? 0
+    const last = improveRuns[improveRuns.length - 1].metric ?? 0
+    const dir = configDirection === 'higher' ? last > first : last < first
+    if (dir) {
+      trends.push(`Metrics improving across keep-runs: ${first} → ${last}`)
+    }
+  }
+
+  const crashRuns = runs.filter(r => r.status === 'crash')
+  if (crashRuns.length > runs.length * 0.3) {
+    trends.push(`High crash rate (${crashRuns.length}/${runs.length}): check experiment stability`)
+  }
+
+  const analysis: AnalyzeStats = {
+    total: runs.length,
+    byStatus,
+    metricRange,
+    topPerforming: topRun,
+    trends: trends.length > 0 ? trends : undefined,
+  }
+
+  const context = input.analyze_context ? `\nContext: ${input.analyze_context}` : ''
+  const metricsStr = metricRange
+    ? `\n${configMetricName}: range [${metricRange.min}, ${metricRange.max}], avg=${metricRange.avg.toFixed(4)}, last=${metricRange.last}`
+    : ''
+  const trendsStr = trends.length > 0 ? `\nTrends:\n  ${trends.join('\n  ')}` : ''
+  const groupingStr = `\nBy-${groupByKey}: ${JSON.stringify(groups)}`
+
+  return {
+    success: true,
+    mode: 'inactive',
+    action: 'analyze',
+    message: `Analysis: ${runs.length} runs across ${Object.keys(byStatus).length} statuses.${metricsStr}${trendsStr}${groupingStr}${context}`,
+    analysis: analysis as unknown as Record<string, unknown>,
+  }
+}
+
 export const AutoresearchTool = buildTool({
   name: 'autoresearch',
   searchHint: 'autonomous research optimization loop',
   maxResultSizeChars: 100_000,
   userFacingName,
   async description() {
-    return 'Run a session-based autonomous optimization loop with a strong state machine: init_experiment -> run_experiment -> log_experiment.'
+    return 'Run a session-based autonomous optimization loop with a strong state machine: init_experiment -> run_experiment -> log_experiment. Also supports queue (multi-job batch), audit (experiment integrity), and analyze (cross-experiment statistics).'
   },
   async prompt() {
-    return 'Autoresearch tool: supports action=start|status|off|clear|init_experiment|run_experiment|log_experiment. Preferred protocol is strict: init_experiment once, run_experiment, then log_experiment every time. checks_failed cannot be kept; discard/crash/checks_failed auto-revert non-autoresearch changes.'
+    return 'Autoresearch tool: supports action=start|status|off|clear|init_experiment|run_experiment|log_experiment|queue|queue_status|queue_stop|audit|analyze. Preferred protocol is strict: init_experiment once, run_experiment, then log_experiment every time. checks_failed cannot be kept; discard/crash/checks_failed auto-revert non-autoresearch changes. queue runs multi-job manifests with dependency tracking. audit checks experiment integrity. analyze computes cross-experiment statistics from JSONL.'
   },
   get inputSchema(): InputSchema {
     return inputSchema()
@@ -1223,6 +2030,25 @@ export const AutoresearchTool = buildTool({
         message: `Cleared ${AUTORESEARCH_JSONL} and turned autoresearch mode OFF.\nWork dir: ${workDir}`,
         session: await buildSessionSnapshot(cwd, workDir),
       }
+    }
+
+    // =============================================================================
+    // New ported features: Queue, Audit, Analyze
+    // =============================================================================
+    if (action === 'queue') {
+      return await handleQueueAction(input, workDir, context.abortController.signal)
+    }
+    if (action === 'queue_status') {
+      return await handleQueueStatus(input, workDir)
+    }
+    if (action === 'queue_stop') {
+      return await handleQueueStop(input, workDir)
+    }
+    if (action === 'audit') {
+      return await handleAuditAction(input, workDir)
+    }
+    if (action === 'analyze') {
+      return await handleAnalyzeAction(input, workDir)
     }
 
     const shouldResume = input.resume ?? true
