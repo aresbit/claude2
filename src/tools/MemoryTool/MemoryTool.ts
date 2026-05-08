@@ -49,6 +49,42 @@ const deleteInputSchema = z.strictObject({
   id: z.string().describe('Memory ID or filename (without .md extension)'),
 })
 
+// ── Nietzschean Self-Overcoming Actions ──────────────────────────
+
+const evolveInputSchema = z.strictObject({
+  action: z.literal('evolve'),
+  id: z.string().describe('Memory ID to overcome (supersede with new understanding)'),
+  overcomeReason: z.string().describe('Why the old belief is being overcome — what was learned'),
+  newContent: z.string().describe('The new, higher understanding that replaces the old'),
+  newName: z.string().optional().describe('Optional new name for the evolved memory'),
+})
+
+const rehearseInputSchema = z.strictObject({
+  action: z.literal('rehearse'),
+  query: z.string().optional().describe('Optional search query to filter which memories to rehearse'),
+  type: z.enum(MEMORY_TYPES).optional().describe('Optional filter by memory type'),
+  limit: z.number().optional().default(5).describe('Maximum memories to rehearse (default 5)'),
+})
+
+const summarizeInputSchema = z.strictObject({
+  action: z.literal('summarize'),
+  id: z.string().describe('Memory ID to create a recoverable compressed version of'),
+  summary: z.string().describe('Compressed summary of the memory content'),
+  keyPoints: z.array(z.string()).describe('Key points extracted from the memory'),
+})
+
+const genealogyInputSchema = z.strictObject({
+  action: z.literal('genealogy'),
+  id: z.string().describe('Memory ID to trace the full evolution chain for'),
+})
+
+const synthesizeInputSchema = z.strictObject({
+  action: z.literal('synthesize'),
+  domain: z.string().describe('Domain name for the knowledge article (e.g., "React Performance", "API Design")'),
+  query: z.string().optional().describe('Optional search query to find related memories (defaults to domain name)'),
+  type: z.enum(MEMORY_TYPES).optional().describe('Optional filter by memory type'),
+})
+
 const inputSchema = lazySchema(() =>
   z.discriminatedUnion('action', [
     saveInputSchema,
@@ -57,6 +93,11 @@ const inputSchema = lazySchema(() =>
     getInputSchema,
     updateInputSchema,
     deleteInputSchema,
+    evolveInputSchema,
+    rehearseInputSchema,
+    summarizeInputSchema,
+    genealogyInputSchema,
+    synthesizeInputSchema,
   ])
 )
 
@@ -110,6 +151,40 @@ const deleteOutputSchema = z.object({
   id: z.string(),
 })
 
+const evolveOutputSchema = z.object({
+  action: z.literal('evolve'),
+  overcome: memoryOutputSchema,
+  successor: memoryOutputSchema,
+  overcomeReason: z.string(),
+})
+
+const rehearseOutputSchema = z.object({
+  action: z.literal('rehearse'),
+  memories: z.array(memoryOutputSchema),
+  rehearsal: z.string(),
+  count: z.number(),
+})
+
+const summarizeOutputSchema = z.object({
+  action: z.literal('summarize'),
+  original: memoryOutputSchema,
+  summary: memoryOutputSchema,
+})
+
+const genealogyOutputSchema = z.object({
+  action: z.literal('genealogy'),
+  chain: z.array(memoryOutputSchema),
+  depth: z.number(),
+})
+
+const synthesizeOutputSchema = z.object({
+  action: z.literal('synthesize'),
+  domain: z.string(),
+  memories: z.array(memoryOutputSchema),
+  article: z.string(),
+  memoryCount: z.number(),
+})
+
 const outputSchema = lazySchema(() =>
   z.union([
     saveOutputSchema,
@@ -118,6 +193,11 @@ const outputSchema = lazySchema(() =>
     getOutputSchema,
     updateOutputSchema,
     deleteOutputSchema,
+    evolveOutputSchema,
+    rehearseOutputSchema,
+    summarizeOutputSchema,
+    genealogyOutputSchema,
+    synthesizeOutputSchema,
   ])
 )
 
@@ -262,6 +342,90 @@ export const MemoryTool = buildTool({
         }
       }
 
+      // ── Nietzschean Self-Overcoming Actions ──────────────────
+
+      case 'evolve': {
+        const result = await store.evolveMemory(
+          input.id,
+          input.overcomeReason,
+          input.newContent,
+          input.newName,
+        )
+        if (!result) {
+          throw new Error(`Memory with ID ${input.id} not found — cannot evolve what does not exist`)
+        }
+        return {
+          data: {
+            action: 'evolve' as const,
+            overcome: memoryToSerializable(result.overcome),
+            successor: memoryToSerializable(result.successor),
+            overcomeReason: input.overcomeReason,
+          },
+        }
+      }
+
+      case 'rehearse': {
+        const { rehearsal, memories } = await store.rehearseMemories(
+          input.query,
+          input.type,
+          input.limit,
+        )
+        return {
+          data: {
+            action: 'rehearse' as const,
+            memories: memories.map(memoryToSerializable),
+            rehearsal,
+            count: memories.length,
+          },
+        }
+      }
+
+      case 'summarize': {
+        const result = await store.summarizeMemory(
+          input.id,
+          input.summary,
+          input.keyPoints,
+        )
+        if (!result) {
+          throw new Error(`Memory with ID ${input.id} not found — cannot summarize`)
+        }
+        return {
+          data: {
+            action: 'summarize' as const,
+            original: memoryToSerializable(result.original),
+            summary: memoryToSerializable(result.summary),
+          },
+        }
+      }
+
+      case 'genealogy': {
+        const chain = await store.getGenealogy(input.id)
+        return {
+          data: {
+            action: 'genealogy' as const,
+            chain: chain.map(memoryToSerializable),
+            depth: chain.length,
+          },
+        }
+      }
+
+      case 'synthesize': {
+        const { domain: dom, memories, article } = await store.synthesizeDomain(
+          input.domain,
+          input.query,
+          input.type,
+        )
+        return {
+          data: {
+            action: 'synthesize' as const,
+            domain: dom,
+            memories: memories.map(memoryToSerializable),
+            article,
+            memoryCount: memories.length,
+          },
+        }
+      }
+
       default:
         throw new Error(`Unknown action: ${(input as any).action}`)
     }
@@ -293,6 +457,24 @@ export const MemoryTool = buildTool({
           ? `Deleted memory ${data.id}`
           : `Failed to delete memory ${data.id}`
         break
+      case 'evolve':
+        message = `Memory evolved: "${data.overcome.name}" overcome → "${data.successor.name}"\nReason: ${data.overcomeReason}`
+        break
+      case 'rehearse':
+        message = data.count > 0
+          ? `Rehearsed ${data.count} memories — written to REHEARSAL.md for context injection`
+          : 'No memories found to rehearse'
+        break
+      case 'summarize':
+        message = `Memory "${data.original.name}" compressed → "${data.summary.name}" (recoverable)`
+        break
+      case 'genealogy':
+        message = data.depth > 0
+          ? `Genealogy chain of ${data.depth} memories: ${data.chain.map(m => m.name).join(' → ')}`
+          : 'No genealogy chain found'
+        break
+      case 'synthesize':
+        message = `Domain knowledge synthesized: "${data.domain}" — ${data.memoryCount} memories aggregated into structured article.\n\nTo save to wiki: use WikiTool with the article content as description. The article is in the output data.article field.`
     }
 
     return {

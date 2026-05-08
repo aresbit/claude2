@@ -53,6 +53,8 @@ const outputSchema = lazySchema(() =>
     success: z.boolean().describe('Whether the operation succeeded'),
     sourceFile: z.string().describe('Path to saved source file'),
     memoryFile: z.string().optional().describe('Path to saved memory file'),
+    summaryFile: z.string().optional().describe('Path to recoverable compressed summary'),
+    errorFile: z.string().optional().describe('Path to error knowledge gap file (when fetch fails)'),
     url: z.string().describe('The URL that was fetched'),
     title: z.string().describe('Title of the content'),
     message: z.string().describe('Status message'),
@@ -289,23 +291,65 @@ export const WikiTool = buildTool({
         'utf-8',
       )
 
+      // ── Recoverable Compression: save a compact summary alongside the full content
+      const summaryPath = join(sourceDir, `${sanitizeFilename(input.title)}.summary.md`)
+      const summaryContent = `## Recoverable Summary: ${input.title}
+
+**Source**: ${input.url}
+**Full Content**: [${filename}](${filename})
+**Fetched**: ${isoDate}
+**Category**: ${normalizedCategory}
+
+> This is a recoverable compressed version. The full content is preserved at \`${filename}\`.
+> From Manus §4: "The compression strategy is always designed to be recoverable."
+`
+
+      await writeFile(summaryPath, summaryContent, 'utf-8')
+
+      // ── Append-Only Deterministic Log (KV-Cache friendly, from Manus §2)
+      await appendFile(
+        join(logDir, 'log.md'),
+        `| ${isoDate} | ingest | ${input.title} | ${normalizedCategory} | ${filename} | ${input.saveMemory ? 'memory' : 'nomem'} | ${input.url} |\n`,
+        'utf-8',
+      )
+
       return {
         data: {
           success: true,
           sourceFile,
           memoryFile,
+          summaryFile: summaryPath,
           url: input.url,
           title: input.title,
-          message: `Saved "${input.title}" to ${sourceFile}`,
+          message: `Saved "${input.title}" to ${sourceFile} (summary: ${summaryPath})`,
         },
       }
     } catch (error) {
+      // ── Error as Knowledge (from Manus §6): Preserve failure metadata
+      const errorLogDir = join(wikiBasePath, 'wiki', 'errors')
+      await mkdir(errorLogDir, { recursive: true })
+      const errorFile = join(errorLogDir, `${sanitizeFilename(input.title)}_${Date.now()}.md`)
+      const errorContent = `## Knowledge Gap: ${input.title}
+
+**Attempted URL**: ${input.url}
+**Attempted At**: ${isoTimestamp}
+**Category**: ${normalizedCategory}
+**Error**: ${error instanceof Error ? error.message : String(error)}
+
+> "Errors are not the exception; they are part of the loop." — Manus §6
+> This failure is preserved as searchable intelligence for future attempts.
+> When the URL becomes accessible or knowledge in this domain advances, revisit.
+`
+
+      await writeFile(errorFile, errorContent, 'utf-8')
+
       return {
         data: {
           success: false,
           sourceFile: '',
           url: input.url,
           title: input.title,
+          errorFile,
           message: error instanceof Error ? error.message : String(error),
         },
       }
@@ -314,8 +358,8 @@ export const WikiTool = buildTool({
   mapToolResultToToolResultBlockParam(content, toolUseID) {
     const output = content as Output
     const summary = output.success
-      ? `Saved "${output.title}" to wiki`
-      : `Failed to save "${output.title}" to wiki: ${output.message}`
+      ? `Saved "${output.title}" to wiki (recoverable compression enabled)`
+      : `Failed to save "${output.title}" — preserved as knowledge gap: ${output.message}`
     return {
       tool_use_id: toolUseID,
       type: 'tool_result',
