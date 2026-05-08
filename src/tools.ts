@@ -100,6 +100,8 @@ import { GoalCreateTool } from './tools/GoalTool/GoalCreateTool.js'
 import { GoalGetTool } from './tools/GoalTool/GoalGetTool.js'
 import { GoalUpdateTool } from './tools/GoalTool/GoalUpdateTool.js'
 import { GoalClearTool } from './tools/GoalTool/GoalClearTool.js'
+import { McpFsTool } from './tools/McpFsTool/McpFsTool.js'
+import { McpFsDiscoverTool } from './tools/McpFsTool/McpFsDiscoverTool.js'
 import uniqBy from 'lodash-es/uniqBy.js'
 import { isToolSearchEnabledOptimistic } from './utils/toolSearch.js'
 import { isTodoV2Enabled } from './utils/tasks.js'
@@ -251,6 +253,8 @@ export function getAllBaseTools(): Tools {
     GoalGetTool,
     GoalUpdateTool,
     GoalClearTool,
+    McpFsTool,
+    McpFsDiscoverTool,
     ...(OverflowTestTool ? [OverflowTestTool] : []),
     ...(CtxInspectTool ? [CtxInspectTool] : []),
     ...(TerminalCaptureTool ? [TerminalCaptureTool] : []),
