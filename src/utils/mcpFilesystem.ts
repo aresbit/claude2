@@ -493,16 +493,19 @@ export async function discoverAndGenerate(): Promise<{
 /**
  * Scan for manifest.json files in the servers directory.
  * Also supports individual .ts files (ls-style discovery).
+ * Also auto-discovers traditional MCP servers from system configs.
  */
-export async function discoverTools(): Promise<McpFsRegistryEntry[]> {
+export async function discoverTools(opts?: {
+  probeMcpServers?: boolean
+}): Promise<McpFsRegistryEntry[]> {
   const serversDir = getServersDir()
   if (!existsSync(serversDir)) {
-    return []
+    await mkdir(serversDir, { recursive: true })
   }
 
   const entries: McpFsRegistryEntry[] = []
   let serverDirs: string[]
-  try { serverDirs = await readdir(serversDir) } catch { return [] }
+  try { serverDirs = await readdir(serversDir) } catch { serverDirs = [] }
 
   for (const serverName of serverDirs) {
     const serverDir = join(serversDir, serverName)
@@ -552,12 +555,239 @@ export async function discoverTools(): Promise<McpFsRegistryEntry[]> {
     } catch { /* skip unreadable dirs */ }
   }
 
+  // ── Traditional MCP Server Bridge Discovery ──────────────────────
+  // Scan .mcp.json / settings.json for configured MCP servers,
+  // probe them for tools, and register bridge entries.
+  const shouldProbe = opts?.probeMcpServers !== false
+  if (shouldProbe) {
+    try {
+      const bridgeEntries = await discoverMcpBridgeTools()
+      entries.push(...bridgeEntries)
+    } catch { /* bridge discovery is best-effort */ }
+  }
+
   // Persist registry
   await mkdir(getMcpFsBaseDir(), { recursive: true })
   await writeFile(
     join(getMcpFsBaseDir(), 'registry.json'),
     jsonStringify(entries, 2),
   )
+
+  return entries
+}
+
+// ── Traditional MCP Bridge Discovery ────────────────────────────
+
+interface McpServerConfigStub {
+  type?: string
+  command?: string
+  args?: string[]
+  url?: string
+  headers?: Record<string, string>
+  env?: Record<string, string>
+}
+
+interface McpBridgeCache {
+  scannedAt: number
+  servers: Record<string, {
+    config: McpServerConfigStub
+    tools: Array<{
+      name: string
+      description?: string
+      inputSchema?: Record<string, unknown>
+    }>
+  }>
+}
+
+/**
+ * Scan the system for traditional MCP server configurations.
+ * Checks .mcp.json files, global settings, and known npm packages.
+ */
+async function getSystemMcpConfigs(): Promise<Record<string, McpServerConfigStub>> {
+  const configs: Record<string, McpServerConfigStub> = {}
+
+  // 1. Scan .mcp.json files in project tree
+  try {
+    const cwd = process.cwd()
+    let dir = cwd
+    while (true) {
+      const mcpJsonPath = join(dir, '.mcp.json')
+      if (existsSync(mcpJsonPath)) {
+        try {
+          const content = await readFile(mcpJsonPath, 'utf-8')
+          const parsed = JSON.parse(content)
+          if (parsed.mcpServers && typeof parsed.mcpServers === 'object') {
+            for (const [name, cfg] of Object.entries(parsed.mcpServers)) {
+              if (!configs[name]) {
+                configs[name] = cfg as McpServerConfigStub
+              }
+            }
+          }
+        } catch { /* skip broken files */ }
+      }
+      const parent = join(dir, '..')
+      if (parent === dir) break
+      dir = parent
+    }
+  } catch { /* best effort */ }
+
+  // 2. Global Claude Code settings
+  try {
+    const settingsPath = join(getClaudeConfigHomeDir(), 'settings.json')
+    if (existsSync(settingsPath)) {
+      const content = await readFile(settingsPath, 'utf-8')
+      const parsed = JSON.parse(content)
+      if (parsed.mcpServers && typeof parsed.mcpServers === 'object') {
+        for (const [name, cfg] of Object.entries(parsed.mcpServers)) {
+          if (!configs[name]) {
+            configs[name] = cfg as McpServerConfigStub
+          }
+        }
+      }
+    }
+  } catch { /* best effort */ }
+
+  return configs
+}
+
+/**
+ * Probe a traditional MCP server and list its tools.
+ * Uses a lightweight Node.js subprocess to call the bridge script.
+ */
+async function probeMcpServerTools(
+  serverName: string,
+  config: McpServerConfigStub,
+): Promise<McpBridgeCache['servers'][string]['tools']> {
+  const bridgePath = join(getMcpFsBaseDir(), 'bridge.mjs')
+  if (!existsSync(bridgePath)) return []
+
+  const configJson = JSON.stringify(config).replace(/'/g, "'\\''")
+
+  return new Promise((resolve) => {
+    const child = spawn('node', [bridgePath], {
+      env: {
+        ...process.env as Record<string, string>,
+        BRIDGE_SERVER_CONFIG: JSON.stringify(config),
+        BRIDGE_TOOL: '', // empty = list tools mode
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 30000,
+    })
+
+    let stdout = ''
+    child.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
+    child.stderr?.on('data', () => {}) // silence
+    child.on('close', () => {
+      try {
+        const result = JSON.parse(stdout.trim() || '{}')
+        if (result.tools && Array.isArray(result.tools)) {
+          resolve(result.tools)
+        } else if (result.error) {
+          // Server not available — that's OK, skip
+          resolve([])
+        } else {
+          resolve([])
+        }
+      } catch {
+        resolve([])
+      }
+    })
+    child.on('error', () => resolve([]))
+  })
+}
+
+/**
+ * Discover tools from traditional MCP servers and create bridge registry entries.
+ * Caches results to avoid re-probing on every discovery cycle.
+ */
+async function discoverMcpBridgeTools(): Promise<McpFsRegistryEntry[]> {
+  const cacheDir = join(getMcpFsBaseDir(), 'cache')
+  await mkdir(cacheDir, { recursive: true })
+  const cachePath = join(cacheDir, 'mcp-bridge.json')
+
+  const CACHE_TTL_MS = 5 * 60 * 1000 // 5 minutes
+
+  // Try cache first
+  let cache: McpBridgeCache | null = null
+  try {
+    if (existsSync(cachePath)) {
+      cache = JSON.parse(await readFile(cachePath, 'utf-8'))
+      if (Date.now() - cache.scannedAt > CACHE_TTL_MS) {
+        cache = null // expired
+      }
+    }
+  } catch { cache = null }
+
+  // If cache is valid, use it
+  if (cache) {
+    return cacheToEntries(cache)
+  }
+
+  // Scan for MCP server configs
+  const configs = await getSystemMcpConfigs()
+
+  // Probe each server for tools (with concurrency limit)
+  const serverEntries: McpBridgeCache['servers'] = {}
+  const serverNames = Object.entries(configs)
+
+  // Probe up to 3 servers concurrently to avoid thundering herd
+  const CONCURRENCY = 3
+  for (let i = 0; i < serverNames.length; i += CONCURRENCY) {
+    const batch = serverNames.slice(i, i + CONCURRENCY)
+    const results = await Promise.all(
+      batch.map(async ([name, cfg]) => {
+        const tools = await probeMcpServerTools(name, cfg)
+        return { name, cfg, tools }
+      }),
+    )
+    for (const { name, cfg, tools } of results) {
+      if (tools.length > 0) {
+        serverEntries[name] = { config: cfg, tools }
+      }
+    }
+  }
+
+  // Write cache
+  cache = { scannedAt: Date.now(), servers: serverEntries }
+  try {
+    await writeFile(cachePath, JSON.stringify(cache))
+  } catch { /* best effort */ }
+
+  return cacheToEntries(cache)
+}
+
+/**
+ * Convert MCP bridge cache to MCP-FS registry entries.
+ * Each traditional MCP tool gets a bridge wrapper entry.
+ */
+function cacheToEntries(cache: McpBridgeCache): McpFsRegistryEntry[] {
+  const entries: McpFsRegistryEntry[] = []
+  const bridgePath = join(getMcpFsBaseDir(), 'bridge.mjs')
+
+  for (const [serverName, { config, tools }] of Object.entries(cache.servers)) {
+    const safeServerName = serverName.replace(/[^a-zA-Z0-9_-]/g, '-')
+    // Create pseudo-server directory for TS wrappers
+    const serverDir = join(getServersDir(), `mcp-bridge-${safeServerName}`)
+
+    for (const tool of tools) {
+      const configJson = JSON.stringify(config)
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "'\\''")
+
+      entries.push({
+        server: `mcp-bridge-${safeServerName}`,
+        toolName: tool.name,
+        description: tool.description || `MCP tool: ${serverName}/${tool.name}`,
+        tsFilePath: join(serverDir, `${tool.name}.ts`),
+        command: `BRIDGE_SERVER_CONFIG='${configJson}' BRIDGE_TOOL='${tool.name}' node "${bridgePath}"`,
+        mcpServer: serverName,
+        mcpToolName: tool.name,
+        inputSchema: tool.inputSchema,
+        readOnly: false,  // Unknown — assume mutable
+        destructive: false, // Unknown — assume safe
+      })
+    }
+  }
 
   return entries
 }

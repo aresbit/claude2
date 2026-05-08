@@ -35,9 +35,9 @@ export const McpFsDiscoverTool = buildTool({
   searchHint: 'discover tools from filesystem mcp-fs servers directory',
   maxResultSizeChars: 100_000,
   async description() {
-    const entries = await discoverTools()
+    const entries = await discoverTools({ probeMcpServers: false })
     if (entries.length === 0) {
-      return `Discover MCP tools from the filesystem. Scans ${getMcpFsBaseDir()}/servers/ for tool definitions (.ts files and manifest.json).`
+      return `Discover MCP tools from the filesystem. Scans ${getMcpFsBaseDir()}/servers/ for tool definitions (.ts files and manifest.json). Also scans traditional MCP server configs (.mcp.json, settings.json) — use regenerate=true to probe.`
     }
     return `Discover MCP tools from the filesystem. Currently ${entries.length} tools available across ${new Set(entries.map(e => e.server)).size} servers.`
   },
