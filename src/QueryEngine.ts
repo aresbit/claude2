@@ -34,6 +34,13 @@ import type { CanUseToolFn } from './hooks/useCanUseTool.js'
 import { loadMemoryPrompt } from './memdir/memdir.js'
 import { hasAutoMemPathOverride } from './memdir/paths.js'
 import { query } from './query.js'
+import {
+  markTurnStart,
+  markTurnEnd,
+} from './utils/goalAccounting.js'
+import { checkGoalBudget } from './utils/goalBudget.js'
+import { getContinuationCandidate, onUserOrToolActivity, blockContinuation } from './utils/goalContinuation.js'
+import { pauseGoal, resumeGoal, getGoal } from './tools/GoalTool/utils.js'
 import { categorizeRetryableAPIError } from './services/api/errors.js'
 import type { MCPServerConnection } from './services/mcp/types.js'
 import type { AppState } from './state/AppState.js'
@@ -676,6 +683,9 @@ export class QueryEngine {
       ? countToolCalls(this.mutableMessages, SYNTHETIC_OUTPUT_TOOL_NAME)
       : 0
 
+    // Goal accounting: mark turn start with current token baseline
+    await markTurnStart(this.totalUsage.total_tokens).catch(() => {})
+
     for await (const message of query({
       messages,
       systemPrompt,
@@ -1073,6 +1083,13 @@ export class QueryEngine {
       }
     }
 
+    // Goal accounting: finalize turn and check for auto-continuation
+    await markTurnEnd(this.totalUsage.total_tokens).catch(() => {})
+    const budgetResult = await checkGoalBudget().catch(() => null)
+    const continuation = budgetResult?.blockContinuation
+      ? null
+      : await getContinuationCandidate().catch(() => null)
+
     // Stop hooks yield progress/attachment messages AFTER the assistant
     // response (via yield* handleStopHooks in query.ts). Since #23537 pushes
     // those to `messages` inline, last(messages) can be a progress/attachment
@@ -1182,6 +1199,9 @@ export class QueryEngine {
 
   interrupt(): void {
     this.abortController.abort()
+    // Auto-pause active goal on interrupt (matches Codex behavior)
+    pauseGoal().catch(() => {})
+    blockContinuation(30000)
   }
 
   getMessages(): readonly Message[] {
@@ -1310,6 +1330,22 @@ export async function* ask({
   })
 
   try {
+    // Check for paused goal on resume — prompt user to resume
+    try {
+      const goal = await getGoal()
+      if (goal && goal.status === 'paused') {
+        yield {
+          type: 'system',
+          subtype: 'info',
+          message: `Paused goal found: "${goal.objective}" (${goal.tokensUsed.toLocaleString()} tokens used, ${goal.timeUsedSeconds}s elapsed). Use /goal resume to continue.`,
+          session_id: getSessionId(),
+          uuid: randomUUID(),
+        }
+      }
+    } catch {
+      // Goal storage may not be available
+    }
+
     yield* engine.submitMessage(prompt, {
       uuid: promptUuid,
       isMeta,
