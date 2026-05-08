@@ -357,16 +357,20 @@ export async function executeCode(
   const clientContent = await readFile(clientPath, 'utf-8')
   await writeFile(join(sandboxDir, 'client.ts'), clientContent)
 
-  // Symlink servers directory into sandbox
+  // Symlink servers directory into sandbox so agent code can import tools
   const serversDir = getServersDir()
   const sandboxServersDir = join(sandboxDir, 'servers')
   if (existsSync(serversDir)) {
     try {
-      await writeFile(
-        join(sandboxDir, 'servers_manifest.json'),
-        jsonStringify({ source: serversDir }),
-      )
-    } catch { /* symlink not critical */ }
+      const { symlink } = await import('fs/promises')
+      await symlink(serversDir, sandboxServersDir, 'dir')
+    } catch {
+      // Fallback: copy servers directory
+      try {
+        const { cp } = await import('fs/promises')
+        await cp(serversDir, sandboxServersDir, { recursive: true })
+      } catch { /* best effort */ }
+    }
   }
 
   // Copy registry
