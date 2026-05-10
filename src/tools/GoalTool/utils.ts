@@ -269,6 +269,10 @@ export async function accountGoalUsage(
   if (!goal) return null
   if (goal.status !== 'active') return goal
 
+  // Guard against NaN from previous broken runs (decompiled total_tokens bug)
+  if (isNaN(goal.tokensUsed)) goal.tokensUsed = 0
+  if (isNaN(goal.timeUsedSeconds)) goal.timeUsedSeconds = 0
+
   goal.tokensUsed += Math.max(0, tokenDelta)
   goal.timeUsedSeconds += Math.max(0, timeDeltaSeconds)
   goal.updatedAt = Date.now()

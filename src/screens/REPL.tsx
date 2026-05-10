@@ -143,6 +143,9 @@ import { handlePromptSubmit, type PromptInputHelpers } from '../utils/handleProm
 import { useQueueProcessor } from '../hooks/useQueueProcessor.js';
 import { useMailboxBridge } from '../hooks/useMailboxBridge.js';
 import { queryCheckpoint, logQueryProfileReport } from '../utils/queryProfiler.js';
+import { markTurnStart, markTurnEnd, createGoalQueryTracker } from '../utils/goalAccounting.js';
+import { checkGoalBudget } from '../utils/goalBudget.js';
+import { getContinuationCandidate, onUserOrToolActivity } from '../utils/goalContinuation.js';
 import type { Message as MessageType, UserMessage, ProgressMessage, HookResultMessage, PartialCompactDirection } from '../types/message.js';
 import { query } from '../query.js';
 import { mergeClients, useMergedClients } from '../hooks/useMergedClients.js';
@@ -2799,17 +2802,46 @@ export function REPL({
     resetTurnHookDuration();
     resetTurnToolDuration();
     resetTurnClassifierDuration();
-    for await (const event of query({
-      messages: messagesIncludingNewMessages,
-      systemPrompt,
-      userContext,
-      systemContext,
-      canUseTool,
-      toolUseContext,
-      querySource: getQuerySourceForREPL()
-    })) {
-      onQueryEvent(event);
-    }
+    const goalTracker = createGoalQueryTracker();
+    const MAX_GOAL_AUTO_CONT = 10;
+    let goalAutoContCount = 0;
+    await markTurnStart(0).catch(() => {});
+    let goalBudgetResult;
+    do {
+      for await (const event of query({
+        messages: messagesIncludingNewMessages,
+        systemPrompt,
+        userContext,
+        systemContext,
+        canUseTool,
+        toolUseContext,
+        querySource: getQuerySourceForREPL()
+      })) {
+        goalTracker.processStreamEvent(event);
+        onQueryEvent(event);
+      }
+
+      await markTurnEnd(goalTracker.getTotalTokens()).catch(() => {});
+      goalBudgetResult = await checkGoalBudget().catch(() => null);
+
+      // Active Memory: auto-continue if goal is still active
+      if (!goalBudgetResult?.blockContinuation && goalAutoContCount < MAX_GOAL_AUTO_CONT) {
+        const continuation = await getContinuationCandidate().catch(() => null);
+        if (continuation) {
+          onUserOrToolActivity();
+          goalAutoContCount++;
+          const contMsg = createUserMessage({
+            content: continuation.promptBlocks,
+            isMeta: true,
+          });
+          messagesIncludingNewMessages.push(contMsg);
+          goalTracker.reset();
+          await markTurnStart(0).catch(() => {});
+          continue;
+        }
+      }
+      break;
+    } while (true);
     if (feature('BUDDY')) {
       void fireCompanionObserver(messagesRef.current, reaction => setAppState(prev => prev.companionReaction === reaction ? prev : {
         ...prev,

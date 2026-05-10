@@ -711,7 +711,7 @@ export class QueryEngine {
       }
 
     // Goal accounting: mark turn start with current token baseline
-    await markTurnStart(this.totalUsage.total_tokens).catch(() => {})
+    await markTurnStart(this.totalUsage.input_tokens + this.totalUsage.output_tokens).catch(() => {})
 
     for await (const message of query({
       messages,
@@ -1111,7 +1111,7 @@ export class QueryEngine {
     }
 
     // Goal accounting: finalize turn and check for auto-continuation
-    await markTurnEnd(this.totalUsage.total_tokens).catch(() => {})
+    await markTurnEnd(this.totalUsage.input_tokens + this.totalUsage.output_tokens).catch(() => {})
     const budgetResult = await checkGoalBudget().catch(() => null)
     const continuation = budgetResult?.blockContinuation
       ? null
