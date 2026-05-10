@@ -18,6 +18,11 @@ export function zodToJsonSchema(schema: ZodTypeAny): JsonSchema7Type {
   const hit = cache.get(schema)
   if (hit) return hit
   const result = toJSONSchema(schema) as JsonSchema7Type
+  // Anthropic API requires top-level type: "object". Zod discriminatedUnion
+  // and union produce { oneOf: [...] } without a type field — add it here.
+  if (!result.type && result.oneOf) {
+    result.type = 'object'
+  }
   cache.set(schema, result)
   return result
 }

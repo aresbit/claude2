@@ -19,6 +19,8 @@ import { WikiTool } from './tools/WikiTool/WikiTool.js'
 import { KimiTool } from './tools/KimiTool/KimiTool.js'
 import { GeminiSubtitleTool } from './tools/GeminiSubtitleTool/GeminiSubtitleTool.js'
 import { MythosTool } from './tools/MythosTool/MythosTool.js'
+import { ContentAnalystTool } from './tools/ContentAnalystTool/ContentAnalystTool.js'
+import { StrategyDBTool } from './tools/StrategyDBTool/StrategyDBTool.js'
 import { RedoTool } from './tools/RedoTool/RedoTool.js'
 import { SETool } from './tools/SETool/SETool.js'
 import { PMTool } from './tools/PMTool/PMTool.js'
@@ -239,6 +241,8 @@ export function getAllBaseTools(): Tools {
     KimiTool,
     GeminiSubtitleTool,
     MythosTool,
+    ContentAnalystTool,
+    StrategyDBTool,
     RedoTool,
     SETool,
     PMTool,
