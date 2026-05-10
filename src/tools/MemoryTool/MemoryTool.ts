@@ -85,6 +85,37 @@ const synthesizeInputSchema = z.strictObject({
   type: z.enum(MEMORY_TYPES).optional().describe('Optional filter by memory type'),
 })
 
+// ── Temporary Memory (临时记忆) Actions ──────────────────────
+
+const tempSaveInputSchema = z.strictObject({
+  action: z.literal('temp_save'),
+  content: z.string().describe('Content to save to session-scoped scratchpad (auto-cleared on new session)'),
+})
+
+const tempReadInputSchema = z.strictObject({
+  action: z.literal('temp_read'),
+})
+
+const tempClearInputSchema = z.strictObject({
+  action: z.literal('temp_clear'),
+})
+
+// ── Auto-Rehearsal (工作记忆 + 主动记忆) ────────────────────
+
+const autoRehearseInputSchema = z.strictObject({
+  action: z.literal('auto_rehearse'),
+  query: z.string().optional().describe('Optional context query to find relevant memories for rehearsal'),
+  type: z.enum(MEMORY_TYPES).optional().describe('Optional filter by memory type'),
+  limit: z.number().optional().default(3).describe('Max memories to rehearse (default 3)'),
+})
+
+// ── Archive (长期记忆) ─────────────────────────────────────
+
+const archiveInputSchema = z.strictObject({
+  action: z.literal('archive'),
+  daysOld: z.number().optional().default(90).describe('Archive memories older than this many days (default 90)'),
+})
+
 const inputSchema = lazySchema(() =>
   z.discriminatedUnion('action', [
     saveInputSchema,
@@ -98,6 +129,11 @@ const inputSchema = lazySchema(() =>
     summarizeInputSchema,
     genealogyInputSchema,
     synthesizeInputSchema,
+    tempSaveInputSchema,
+    tempReadInputSchema,
+    tempClearInputSchema,
+    autoRehearseInputSchema,
+    archiveInputSchema,
   ])
 )
 
@@ -185,6 +221,35 @@ const synthesizeOutputSchema = z.object({
   memoryCount: z.number(),
 })
 
+const tempSaveOutputSchema = z.object({
+  action: z.literal('temp_save'),
+  path: z.string(),
+  length: z.number(),
+})
+
+const tempReadOutputSchema = z.object({
+  action: z.literal('temp_read'),
+  content: z.string().nullable(),
+})
+
+const tempClearOutputSchema = z.object({
+  action: z.literal('temp_clear'),
+  cleared: z.boolean(),
+})
+
+const autoRehearseOutputSchema = z.object({
+  action: z.literal('auto_rehearse'),
+  memories: z.array(memoryOutputSchema),
+  rehearsal: z.string(),
+  count: z.number(),
+})
+
+const archiveOutputSchema = z.object({
+  action: z.literal('archive'),
+  archived: z.number(),
+  archiveDir: z.string(),
+})
+
 const outputSchema = lazySchema(() =>
   z.union([
     saveOutputSchema,
@@ -198,6 +263,11 @@ const outputSchema = lazySchema(() =>
     summarizeOutputSchema,
     genealogyOutputSchema,
     synthesizeOutputSchema,
+    tempSaveOutputSchema,
+    tempReadOutputSchema,
+    tempClearOutputSchema,
+    autoRehearseOutputSchema,
+    archiveOutputSchema,
   ])
 )
 
@@ -426,6 +496,70 @@ export const MemoryTool = buildTool({
         }
       }
 
+      // ── Temporary Memory (临时记忆) ────────────────────
+
+      case 'temp_save': {
+        const path = await store.saveScratchpad(input.content)
+        return {
+          data: {
+            action: 'temp_save' as const,
+            path,
+            length: input.content.length,
+          },
+        }
+      }
+
+      case 'temp_read': {
+        const content = await store.readScratchpad()
+        return {
+          data: {
+            action: 'temp_read' as const,
+            content,
+          },
+        }
+      }
+
+      case 'temp_clear': {
+        const cleared = await store.clearScratchpad()
+        return {
+          data: {
+            action: 'temp_clear' as const,
+            cleared,
+          },
+        }
+      }
+
+      // ── Auto-Rehearsal (工作记忆 + 主动记忆) ────────────
+
+      case 'auto_rehearse': {
+        const { rehearsal, memories } = await store.autoRehearse(
+          input.query,
+          input.type,
+          input.limit,
+        )
+        return {
+          data: {
+            action: 'auto_rehearse' as const,
+            memories: memories.map(memoryToSerializable),
+            rehearsal,
+            count: memories.length,
+          },
+        }
+      }
+
+      // ── Archive (长期记忆) ──────────────────────────────
+
+      case 'archive': {
+        const { archived, archiveDir } = await store.archiveOldMemories(input.daysOld)
+        return {
+          data: {
+            action: 'archive' as const,
+            archived,
+            archiveDir,
+          },
+        }
+      }
+
       default:
         throw new Error(`Unknown action: ${(input as any).action}`)
     }
@@ -475,6 +609,33 @@ export const MemoryTool = buildTool({
         break
       case 'synthesize':
         message = `Domain knowledge synthesized: "${data.domain}" — ${data.memoryCount} memories aggregated into structured article.\n\nTo save to wiki: use WikiTool with the article content as description. The article is in the output data.article field.`
+        break
+      // ── Temporary Memory (临时记忆) ──
+      case 'temp_save':
+        message = `Saved ${data.length} characters to scratchpad (临时记忆)`
+        break
+      case 'temp_read':
+        message = data.content
+          ? `Scratchpad (临时记忆): ${data.content.substring(0, 200)}${data.content.length > 200 ? '...' : ''}`
+          : 'Scratchpad is empty'
+        break
+      case 'temp_clear':
+        message = data.cleared
+          ? 'Scratchpad cleared (临时记忆)'
+          : 'Scratchpad was already empty'
+        break
+      // ── Auto-Rehearsal (工作记忆 + 主动记忆) ──
+      case 'auto_rehearse':
+        message = data.count > 0
+          ? `Auto-rehearsed ${data.count} memories with scratchpad — written to REHEARSAL.md (工作记忆)`
+          : 'No active memories to rehearse'
+        break
+      // ── Archive (长期记忆) ──
+      case 'archive':
+        message = data.archived > 0
+          ? `Archived ${data.archived} old memories to ${data.archiveDir} (长期记忆)`
+          : 'No memories needed archiving'
+        break
     }
 
     return {

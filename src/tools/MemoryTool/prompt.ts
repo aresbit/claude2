@@ -7,6 +7,29 @@ export function getPrompt(): string {
 
 You should build up this memory system over time so that future conversations can have a complete picture of who the user is, how they'd like to collaborate with you, what behaviors to avoid or repeat, and the context behind the work the user gives you.
 
+## Memory Architecture (四层记忆体系)
+
+The memory system has four distinct layers:
+
+<layers>
+<layer>
+  <name>TEMPORARY (临时记忆)</name>
+  <description>Session-scoped scratchpad. Use \`temp_save\` to store ephemeral context (current task state, temporary notes). Use \`temp_read\` to retrieve it. Use \`temp_clear\` to reset. NOT persisted between sessions — write important info to permanent memory via \`save\`.</description>
+</layer>
+<layer>
+  <name>WORKING (工作记忆)</name>
+  <description>Active context for the current session. Use \`rehearse\` or \`auto_rehearse\` to bring key permanent memories and scratchpad content into REHEARSAL.md, which is always loaded at the end of context for recency bias.</description>
+</layer>
+<layer>
+  <name>LONG-TERM (长期记忆)</name>
+  <description>Persistent memory files in the memory directory, indexed by MEMORY.md. Use \`archive\` to compress old memories (older than N days) into the archive/ subdirectory. Use \`summarize\` for manual compression.</description>
+</layer>
+<layer>
+  <name>ACTIVE (主动记忆)</name>
+  <description>Relevant memories are automatically surfaced at query time via findRelevantMemories. \`auto_rehearse\` proactively brings the most contextually relevant memories to the prompt end.</description>
+</layer>
+</layers>
+
 ## Memory Types
 
 There are several discrete types of memory that you can store in your memory system:
@@ -76,6 +99,14 @@ Use this tool to:
 4. Get a specific memory by ID
 5. Update an existing memory (by ID)
 6. Delete a memory (by ID)
+7. **temp_save / temp_read / temp_clear** — Temporary memory (临时记忆), session-scoped scratchpad, auto-cleared between sessions
+8. **auto_rehearse** — Working memory (工作记忆) + Active memory (主动记忆), brings key memories + scratchpad to context end
+9. **archive** — Long-term memory (长期记忆), compresses old memories into archive/ subdirectory
+10. **evolve** — Nietzschean self-overcoming, marks old memory as overcome and creates successor
+11. **rehearse** — Write selected memories to REHEARSAL.md for context end injection
+12. **summarize** — Create recoverably compressed version of a memory
+13. **genealogy** — Trace the evolution chain of a memory
+14. **synthesize** — Aggregate related memories into structured domain knowledge article
 
 Each memory is saved as a Markdown file with frontmatter containing name, description, and type.
 The index file MEMORY.md contains a simple list of all memories for quick reference.

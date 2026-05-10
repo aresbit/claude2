@@ -192,7 +192,7 @@ ${memory.content}
     }
 
     const files = await readdir(this.memoryDir)
-    const memoryFiles = files.filter(f => f.endsWith('.md') && f !== 'MEMORY.md')
+    const memoryFiles = files.filter(f => f.endsWith('.md') && f !== 'MEMORY.md' && f !== 'REHEARSAL.md' && f !== 'SCRATCHPAD.md')
 
     const memories: Memory[] = []
     for (const file of memoryFiles) {
@@ -230,7 +230,7 @@ ${memory.content}
     }
 
     const files = await readdir(this.memoryDir)
-    const memoryFiles = files.filter(f => f.endsWith('.md') && f !== 'MEMORY.md')
+    const memoryFiles = files.filter(f => f.endsWith('.md') && f !== 'MEMORY.md' && f !== 'REHEARSAL.md' && f !== 'SCRATCHPAD.md')
 
     // Sort by modification time (newest first)
     const filesWithStats = await Promise.all(
@@ -378,7 +378,7 @@ ${memory.content}
     }
 
     const files = await readdir(this.memoryDir)
-    const memoryFiles = files.filter(f => f.endsWith('.md') && f !== 'MEMORY.md')
+    const memoryFiles = files.filter(f => f.endsWith('.md') && f !== 'MEMORY.md' && f !== 'REHEARSAL.md' && f !== 'SCRATCHPAD.md')
 
     const indexEntries: string[] = []
 
@@ -587,6 +587,201 @@ ${keyPoints.map(p => `- ${p}`).join('\n')}
    * Nietzsche: "The snake which cannot shed its skin perishes."
    * Memories that are not synthesized into knowledge stagnate.
    */
+  // ═══════════════════════════════════════════════════════════════
+  //  Temporary Memory (Scratchpad)
+  //  "Write in sand, carve in stone." — Session-scoped ephemeral storage.
+  // ═══════════════════════════════════════════════════════════════
+
+  private getScratchpadPath(): string {
+    return join(this.memoryDir, 'SCRATCHPAD.md')
+  }
+
+  /**
+   * Save content to the session-scoped scratchpad (临时记忆).
+   * Unlike saveMemory(), this does NOT create an index entry in MEMORY.md.
+   * The scratchpad is ephemeral — it is NOT persisted across sessions
+   * and is auto-cleared on new session start.
+   */
+  async saveScratchpad(content: string): Promise<string> {
+    await this.ensureMemoryDir()
+    const scratchPath = this.getScratchpadPath()
+    const header = `# Scratchpad (临时记忆)\n\n> Session-scoped temporary memory. Auto-cleared on new session.\n> NOT persisted in MEMORY.md index.\n\n`
+    await writeFile(scratchPath, header + content, 'utf-8')
+    return scratchPath
+  }
+
+  /**
+   * Read the current scratchpad content.
+   */
+  async readScratchpad(): Promise<string | null> {
+    const scratchPath = this.getScratchpadPath()
+    try {
+      const content = await readFile(scratchPath, 'utf-8')
+      // Strip the header to return just the user content
+      const lines = content.split('\n')
+      const contentStart = lines.findIndex(l => l.startsWith('## '))  // Find first real section
+      if (contentStart >= 0) {
+        return lines.slice(contentStart).join('\n').trim()
+      }
+      return content.trim()
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Clear the scratchpad (临时记忆). Removes all temp content
+   * for the current session. Idempotent — no error if already empty.
+   */
+  async clearScratchpad(): Promise<boolean> {
+    const scratchPath = this.getScratchpadPath()
+    try {
+      await unlink(scratchPath)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Auto-rehearse active memories into REHEARSAL.md.
+   * When no query is provided, uses the most recently saved memories.
+   * This bridges working memory (工作记忆) and active memory (主动记忆)
+   * by automatically bringing key context to the end of the prompt.
+   */
+  async autoRehearse(
+    query?: string,
+    type?: string,
+    limit: number = 3,
+  ): Promise<{ rehearsal: string; memories: Memory[] }> {
+    // Try to find memories matching current context
+    const memories = query
+      ? await this.searchMemories(query, type, limit)
+      : await this.listMemories(0, limit)
+
+    if (memories.length === 0) {
+      return { rehearsal: '', memories: [] }
+    }
+
+    const lines = [
+      '<!-- AUTO-REHEARSAL: Active memories for current context -->',
+      '',
+      '## Working Memory (工作记忆)',
+      '',
+    ]
+
+    // First: add rehearsal preamble
+    for (const m of memories) {
+      const tags = m.tags?.length ? ` [${m.tags.join(', ')}]` : ''
+      lines.push(`### ${m.name}${tags}`)
+      lines.push(`> ${m.description}`)
+      lines.push('')
+      // Excerpt: first 5 meaningful lines
+      const contentLines = m.content.split('\n').filter(l => l.trim() && !l.startsWith('---'))
+      const excerpt = contentLines.slice(0, 5).join('\n')
+      lines.push(excerpt)
+      lines.push('')
+    }
+
+    // Append scratchpad if it exists
+    const scratchContent = await this.readScratchpad()
+    if (scratchContent) {
+      lines.push('## Current Scratchpad (临时记忆)')
+      lines.push('')
+      lines.push(scratchContent)
+      lines.push('')
+    }
+
+    const rehearsal = lines.join('\n')
+
+    // Write auto-rehearsal file
+    const rehearsalPath = join(this.memoryDir, 'REHEARSAL.md')
+    await writeFile(rehearsalPath, rehearsal, 'utf-8')
+
+    return { rehearsal, memories }
+  }
+
+  /**
+   * Archive old memories — compress memories older than `daysOld` days
+   * into summary files in an archive/ subdirectory. The originals are
+   * preserved but removed from the MEMORY.md index.
+   *
+   * This implements 长期记忆 (Long-term Memory) management:
+   * memories that are no longer actively needed are compressed and
+   * archived rather than deleted.
+   */
+  async archiveOldMemories(
+    daysOld: number = 90,
+  ): Promise<{ archived: number; archiveDir: string }> {
+    await this.ensureMemoryDir()
+
+    const now = Date.now()
+    const maxAge = daysOld * 24 * 60 * 60 * 1000
+    const archiveDir = join(this.memoryDir, 'archive')
+    let archived = 0
+
+    try {
+      const files = await readdir(this.memoryDir)
+      const memoryFiles = files.filter(
+        f => f.endsWith('.md') && f !== 'MEMORY.md' && f !== 'REHEARSAL.md' && f !== 'SCRATCHPAD.md',
+      )
+
+      for (const file of memoryFiles) {
+        const filePath = join(this.memoryDir, file)
+        try {
+          const stats = await stat(filePath)
+          const age = now - stats.mtime.getTime()
+
+          if (age > maxAge) {
+            // Read the memory
+            const content = await readFile(filePath, 'utf-8')
+            const memory = this.parseMemoryFile(content, filePath)
+            if (!memory) continue
+
+            // Ensure archive dir exists
+            if (!existsSync(archiveDir)) {
+              await mkdir(archiveDir, { recursive: true })
+            }
+
+            // Write summary to archive
+            const archiveContent = `## Archived Memory (自动归档)
+**Original**: ${memory.name}
+**Original Type**: ${memory.type}
+**Archived At**: ${new Date().toISOString()}
+**Last Modified**: ${stats.mtime.toISOString()}
+
+### Summary
+${memory.description}
+
+### Tags
+${(memory.tags || ['none']).join(', ')}
+
+### Content
+${memory.content}
+`
+            const archivePath = join(archiveDir, file)
+            await writeFile(archivePath, archiveContent, 'utf-8')
+
+            // Remove original
+            await unlink(filePath)
+            archived++
+          }
+        } catch {
+          continue
+        }
+      }
+
+      if (archived > 0) {
+        // Regenerate index since we removed files
+        await this.regenerateIndex()
+      }
+    } catch {
+      // Directory not readable or no files
+    }
+
+    return { archived, archiveDir }
+  }
+
   async synthesizeDomain(
     domain: string,
     query?: string,

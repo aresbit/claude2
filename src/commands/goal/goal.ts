@@ -85,5 +85,6 @@ export const call: LocalCommandCall = async (args, _context) => {
   return {
     type: 'text',
     value: `Goal created and active: "${goal.objective}"\nToken budget: ${goal.tokenBudget !== null ? goal.tokenBudget.toLocaleString() : 'none'}\n\nCommands: /goal pause | /goal resume | /goal clear | /goal\n`,
+    shouldQuery: true,
   }
 }

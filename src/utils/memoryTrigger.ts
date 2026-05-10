@@ -4,6 +4,21 @@ import { existsSync } from 'fs'
 import { getAutoMemPath } from '../memdir/paths.js'
 
 /**
+ * Read SCRATCHPAD.md content silently — returns null if not found or
+ * unreadable. This bridges 临时记忆 (Temporary Memory) into context.
+ */
+async function readScratchpadSilent(memDir: string): Promise<string | null> {
+  const scratchPath = join(memDir, 'SCRATCHPAD.md')
+  if (!existsSync(scratchPath)) return null
+  try {
+    const content = await readFile(scratchPath, 'utf-8')
+    return content.trim() || null
+  } catch {
+    return null
+  }
+}
+
+/**
  * Auto-Trigger: Surfaces relevant memories into the model's context
  * without the model explicitly calling MemoryTool.search.
  *
@@ -35,22 +50,28 @@ export interface AutoTriggerResult {
  * the system prompt.
  *
  * Priority:
- * 1. REHEARSAL.md (explicitly rehearsed memories)
- * 2. Recent memories from MEMORY.md index (auto-fallback)
- * 3. Empty (no memories available)
+ * 1. REHEARSAL.md (explicitly rehearsed memories + auto-rehearsal)
+ * 2. SCRATCHPAD.md (临时记忆 — session-scoped temporary memory)
+ * 3. Recent memories from MEMORY.md index (auto-fallback)
+ * 4. Empty (no memories available)
  */
 export async function getAutoTriggerContent(): Promise<AutoTriggerResult> {
   const memDir = getAutoMemPath()
 
-  // 1. Try explicit rehearsal file
+  // 1. Try explicit rehearsal file (工作记忆 + 主动记忆)
   const rehearsalPath = join(memDir, 'REHEARSAL.md')
   if (existsSync(rehearsalPath)) {
     try {
       const content = await readFile(rehearsalPath, 'utf-8')
       if (content.trim()) {
-        const memoryCount = (content.match(/^## /gm) || []).length
+        // Also include SCRATCHPAD.md content if it exists (临时记忆)
+        const scratchContent = await readScratchpadSilent(memDir)
+        const combined = scratchContent
+          ? `${content}\n\n<!-- SCRATCHPAD (临时记忆) -->\n${scratchContent}\n`
+          : content
+        const memoryCount = (combined.match(/^## /gm) || []).length
         return {
-          content: `\n<!-- ⚡ AUTO-TRIGGERED MEMORIES (Rehearsal) -->\n${content}\n<!-- END REHEARSAL -->\n`,
+          content: `\n<!-- ⚡ AUTO-TRIGGERED MEMORIES (Rehearsal) -->\n${combined}\n<!-- END REHEARSAL -->\n`,
           memoryCount,
           source: 'rehearsal',
         }
@@ -60,7 +81,17 @@ export async function getAutoTriggerContent(): Promise<AutoTriggerResult> {
     }
   }
 
-  // 2. Fallback: load recent memory index entries
+  // 2. Try standalone SCRATCHPAD.md (临时记忆 fallback)
+  const scratchContent = await readScratchpadSilent(memDir)
+  if (scratchContent) {
+    return {
+      content: `\n<!-- ⚡ SCRATCHPAD (临时记忆) -->\n${scratchContent}\n<!-- END SCRATCHPAD -->\n`,
+      memoryCount: 1,
+      source: 'rehearsal',
+    }
+  }
+
+  // 3. Fallback: load recent memory index entries
   const indexPath = join(memDir, 'MEMORY.md')
   if (existsSync(indexPath)) {
     try {
@@ -105,7 +136,7 @@ export async function getDomainContext(
 
   const { readdir, readFile: rf } = await import('fs/promises')
   const files = await readdir(memDir)
-  const memoryFiles = files.filter(f => f.endsWith('.md') && f !== 'MEMORY.md' && f !== 'REHEARSAL.md')
+  const memoryFiles = files.filter(f => f.endsWith('.md') && f !== 'MEMORY.md' && f !== 'REHEARSAL.md' && f !== 'SCRATCHPAD.md')
 
   const domainLower = domain.toLowerCase()
   const relevant: string[] = []

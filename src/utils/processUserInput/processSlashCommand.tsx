@@ -707,7 +707,7 @@ async function getMessagesForSlashCommand(commandName: string, args: string, set
             // Text result — use system message so it doesn't render as a user bubble
             return {
               messages: [userMessage, createCommandInputMessage(`<local-command-stdout>${result.value}</local-command-stdout>`)],
-              shouldQuery: false,
+              shouldQuery: result.shouldQuery ?? false,
               command,
               resultText: result.value
             };
