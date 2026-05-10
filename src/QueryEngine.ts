@@ -437,6 +437,9 @@ export class QueryEngine {
       querySource: 'sdk',
     })
 
+    // Reset auto-continuation guard on user activity
+    onUserOrToolActivity()
+
     // Push new messages, including user input and any attachments
     this.mutableMessages.push(...messagesFromUserInput)
 
@@ -682,6 +685,30 @@ export class QueryEngine {
     const initialStructuredOutputCalls = jsonSchema
       ? countToolCalls(this.mutableMessages, SYNTHETIC_OUTPUT_TOOL_NAME)
       : 0
+
+    // Active Memory: auto-continuation loop for goal pursuit
+    const MAX_AUTO_CONTINUATIONS = 10
+    let autoContinuationCount = 0
+    let autoContinuationPrompt: ContentBlockParam[] | null = null
+
+    while (true) {
+      // Inject continuation prompt on subsequent loop iterations
+      if (autoContinuationPrompt) {
+        onUserOrToolActivity()
+        const contMsg: Message = {
+          type: 'user',
+          uuid: randomUUID(),
+          isMeta: true,
+          message: {
+            role: 'user',
+            content: autoContinuationPrompt,
+          },
+        }
+        this.mutableMessages.push(contMsg)
+        messages.push(contMsg)
+        turnCount = 1
+        autoContinuationPrompt = null
+      }
 
     // Goal accounting: mark turn start with current token baseline
     await markTurnStart(this.totalUsage.total_tokens).catch(() => {})
@@ -1090,6 +1117,13 @@ export class QueryEngine {
       ? null
       : await getContinuationCandidate().catch(() => null)
 
+    // Active Memory: auto-continue if goal is still active
+    if (continuation && autoContinuationCount < MAX_AUTO_CONTINUATIONS) {
+      autoContinuationPrompt = continuation.promptBlocks
+      autoContinuationCount++
+      continue
+    }
+
     // Stop hooks yield progress/attachment messages AFTER the assistant
     // response (via yield* handleStopHooks in query.ts). Since #23537 pushes
     // those to `messages` inline, last(messages) can be a progress/attachment
@@ -1194,6 +1228,8 @@ export class QueryEngine {
         initialAppState.fastMode,
       ),
       uuid: randomUUID(),
+    }
+    break
     }
   }
 

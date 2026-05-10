@@ -210,11 +210,19 @@ function copyNative(text: string): void {
       })
       return
     }
-    case 'win32':
-      // clip.exe is always available on Windows. Unicode handling is
-      // imperfect (system locale encoding) but good enough for a fallback.
-      void execFileNoThrow('clip', [], opts)
+    case 'win32': {
+      // Windows: use PowerShell Set-Clipboard with base64-encoded UTF-16LE.
+      // clip.exe reads stdin using the console code page (e.g., GBK on zh-CN
+      // Windows), which mangles non-ASCII text when the terminal uses UTF-8.
+      // By encoding as base64, we bypass console code page entirely.
+      const b64 = Buffer.from(text, 'utf16le').toString('base64')
+      void execFileNoThrow('powershell.exe', [
+        '-NoProfile',
+        '-Command',
+        `Set-Clipboard -Value ([System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String('${b64}')))`,
+      ], { useCwd: false, timeout: 2000 })
       return
+    }
   }
 }
 
