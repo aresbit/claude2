@@ -38,3 +38,61 @@ export function isFirstPartyAnthropicBaseUrl(): boolean {
     return false
   }
 }
+
+/**
+ * DeepSeek API detection patterns. Matches known DeepSeek API endpoints
+ * and common proxy/gateway URLs that route to DeepSeek.
+ */
+const DEEPSEEK_HOST_PATTERNS = [
+  'api.deepseek.com',
+  'api.deepseek.ai',
+  'deepseek-api.',
+  '-deepseek-',
+]
+
+const DEEPSEEK_MODEL_PREFIX = 'deepseek'
+
+/**
+ * Detect if the configured API endpoint is DeepSeek.
+ *
+ * Detection order:
+ * 1. ANTHROPIC_BASE_URL host matches known DeepSeek patterns
+ * 2. ANTHROPIC_MODEL starts with 'deepseek' (fallback for proxy setups)
+ *
+ * Returns false when ANTHROPIC_BASE_URL is unset (defaults to Anthropic).
+ */
+export function isDeepSeekAPI(): boolean {
+  const baseUrl = process.env.ANTHROPIC_BASE_URL
+  if (baseUrl) {
+    try {
+      const host = new URL(baseUrl).host
+      if (DEEPSEEK_HOST_PATTERNS.some(p => host.includes(p))) {
+        return true
+      }
+    } catch {
+      // invalid URL — fall through to model check
+    }
+  }
+
+  // Fallback: check if the model name signals DeepSeek
+  const model = process.env.ANTHROPIC_MODEL
+  if (model && model.toLowerCase().startsWith(DEEPSEEK_MODEL_PREFIX)) {
+    return true
+  }
+
+  return false
+}
+
+/**
+ * Master toggle for DeepSeek prefix optimization.
+ *
+ * Returns true when:
+ * - The API endpoint is detected as DeepSeek, AND
+ * - CLAUDE_CODE_DISABLE_DEEPSEEK_PREFIX_OPT is NOT set
+ *
+ * The env var serves as both a global kill-switch and a per-session opt-out.
+ */
+export function isDeepSeekPrefixOptEnabled(): boolean {
+  if (!isDeepSeekAPI()) return false
+  return !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_DEEPSEEK_PREFIX_OPT)
+}

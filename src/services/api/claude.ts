@@ -24,6 +24,7 @@ import {
   getAPIProvider,
   isFirstPartyAnthropicBaseUrl,
 } from 'src/utils/model/providers.js'
+import { isDeepSeekOptimizerActive } from './deepseekOptimizer.js'
 import {
   getAttributionHeader,
   getCLISyspromptPrefix,
@@ -318,6 +319,9 @@ export function getExtraBodyParams(betaHeaders?: string[]): JsonObject {
 }
 
 export function getPromptCachingEnabled(model: string): boolean {
+  // DeepSeek uses automatic byte-prefix caching — Anthropic-style cache_control
+  // blocks are unrecognized and add unnecessary bytes to the request.
+  if (isDeepSeekOptimizerActive()) return false
   // Global disable takes precedence
   if (isEnvTruthy(process.env.DISABLE_PROMPT_CACHING)) return false
 
@@ -2384,6 +2388,15 @@ async function* queryModel(
         )
       }
 
+      // DeepSeek: record per-turn cache hit metrics
+      if (isDeepSeekOptimizerActive()) {
+        const { getDeepSeekOptimizer } = await import('./deepseekOptimizer.js')
+        const optimizer = getDeepSeekOptimizer()
+        if (optimizer) {
+          optimizer.recordUsage(usage)
+        }
+      }
+
       // Process fallback percentage header and quota status if available
       // streamResponse is set when the stream is created in the withRetry callback above
       // TypeScript's control flow analysis can't track that streamResponse is set in the callback
@@ -3062,6 +3075,16 @@ export function addCacheBreakpoints(
   pinnedEdits?: CachedMCPinnedEdits[],
   skipCacheWrite = false,
 ): MessageParam[] {
+  // DeepSeek: automatic byte-prefix caching — no explicit cache_control markers,
+  // no cache_edits, no cache_reference. Just convert messages to API params.
+  if (isDeepSeekOptimizerActive()) {
+    return messages.map(msg => {
+      if (msg.type === 'user') {
+        return userMessageToMessageParam(msg, false, false, querySource)
+      }
+      return assistantMessageToMessageParam(msg, false, false, querySource)
+    })
+  }
   logEvent('tengu_api_cache_breakpoints', {
     totalMessageCount: messages.length,
     cachingEnabled: enablePromptCaching,
@@ -3211,6 +3234,14 @@ export function buildSystemPromptBlocks(
     querySource?: QuerySource
   },
 ): TextBlockParam[] {
+  // DeepSeek: emit system prompt as a single flat block — no cache_control
+  // markers (DeepSeek uses automatic byte-prefix caching, not explicit markers).
+  if (isDeepSeekOptimizerActive()) {
+    return systemPrompt.map(block => ({
+      type: 'text' as const,
+      text: block,
+    }))
+  }
   // IMPORTANT: Do not add any more blocks for caching or you will get a 400
   return splitSysPromptPrefix(systemPrompt, {
     skipGlobalCacheForSystemPrompt: options?.skipGlobalCacheForSystemPrompt,
