@@ -180,7 +180,9 @@ async function main() {
             key !== 'BRIDGE_SERVER_CONFIG' &&
             key !== 'MCP_ARG_TOOL' &&
             key !== 'MCP_ARG_TOOL_NAME') {
-          const argName = key.replace('MCP_ARG_', '').replace(/^[A-Z]/, c => c.toLowerCase()).replace(/_([A-Z])/g, (_, c) => c.toLowerCase());
+          // Convert SNAKE_CASE or UPPER_CASE → snake_case (lowercase all)
+          // This handles: url→url, MAX_LENGTH→max_length, startIndex→startindex (not perfect but correct for the common case)
+          const argName = key.replace('MCP_ARG_', '').toLowerCase();
           // Try to parse JSON values
           try { toolArgs[argName] = JSON.parse(value); } catch { toolArgs[argName] = value; }
         }
