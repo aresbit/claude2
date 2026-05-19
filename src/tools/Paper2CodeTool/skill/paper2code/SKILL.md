@@ -29,6 +29,9 @@ Run via Bash:
 pip install pymupdf4llm pdfplumber requests pyyaml
 ```
 
+If pip installs fail for optional packages (pymupdf4llm, pdfplumber), the scripts
+fall back gracefully to ar5iv HTML extraction — no need to force-install those.
+
 ## Execute pipeline
 
 ### Stage 1 — Paper Acquisition and Parsing
@@ -36,11 +39,11 @@ Read and follow: `pipeline/01_paper_acquisition.md`
 
 Run the helper script to fetch and parse the paper:
 ```bash
-python skills/paper2code/scripts/fetch_paper.py {ARXIV_ID} .paper2code_work/{ARXIV_ID}/
+python ${CLAUDE_SKILL_DIR}/scripts/fetch_paper.py {ARXIV_ID} .paper2code_work/{ARXIV_ID}/
 ```
 Then run structure extraction:
 ```bash
-python skills/paper2code/scripts/extract_structure.py .paper2code_work/{ARXIV_ID}/paper_text.md .paper2code_work/{ARXIV_ID}/
+python ${CLAUDE_SKILL_DIR}/scripts/extract_structure.py .paper2code_work/{ARXIV_ID}/paper_text.md .paper2code_work/{ARXIV_ID}/
 ```
 Verify the outputs exist before proceeding. If extraction failed, follow the fallback protocol in `pipeline/01_paper_acquisition.md`.
 

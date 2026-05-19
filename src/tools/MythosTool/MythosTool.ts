@@ -514,13 +514,15 @@ export const MythosTool = buildTool({
         .join('\n')
 
       return {
-        success: true,
-        mode: runtime?.mode ?? 'inactive',
-        action,
-        message,
-        reportPath: ls && ls.currentDepth >= ls.maxDepth ? join(workDir, MYTHOS_REPORT) : undefined,
-        depthReached: ls?.currentDepth,
-        findingsCount: ls?.accumulatedFindings.length,
+        data: {
+          success: true,
+          mode: runtime?.mode ?? 'inactive',
+          action,
+          message,
+          reportPath: ls && ls.currentDepth >= ls.maxDepth ? join(workDir, MYTHOS_REPORT) : undefined,
+          depthReached: ls?.currentDepth,
+          findingsCount: ls?.accumulatedFindings.length,
+        },
       }
     }
 
@@ -533,20 +535,24 @@ export const MythosTool = buildTool({
         }
       }
       return {
-        success: true,
-        mode: 'inactive',
-        action,
-        message: `Cleared Mythos research artifacts in ${workDir}`,
+        data: {
+          success: true,
+          mode: 'inactive',
+          action,
+          message: `Cleared Mythos research artifacts in ${workDir}`,
+        },
       }
     }
 
     // research or continue
     if (action === 'research' && !topic) {
       return {
-        success: false,
-        mode: 'inactive',
-        action,
-        message: 'action=research requires a topic.',
+        data: {
+          success: false,
+          mode: 'inactive',
+          action,
+          message: 'action=research requires a topic.',
+        },
       }
     }
 
@@ -562,10 +568,12 @@ export const MythosTool = buildTool({
 
     if (!runtime?.latentState) {
       return {
-        success: false,
-        mode: 'inactive',
-        action,
-        message: 'Failed to initialize Mythos workspace.',
+        data: {
+          success: false,
+          mode: 'inactive',
+          action,
+          message: 'Failed to initialize Mythos workspace.',
+        },
       }
     }
 
@@ -656,13 +664,15 @@ export const MythosTool = buildTool({
       })
 
       return {
-        success: true,
-        mode: 'inactive',
-        action,
-        message: `Mythos deep research completed for "${effectiveTopic}".\nDepth reached: ${ls.currentDepth} / ${maxDepth}\nFindings: ${ls.accumulatedFindings.length}\nDirections explored: ${ls.completedDirections.length}\nReport: ${reportPath}`,
-        reportPath,
-        depthReached: ls.currentDepth,
-        findingsCount: ls.accumulatedFindings.length,
+        data: {
+          success: true,
+          mode: 'inactive',
+          action,
+          message: `Mythos deep research completed for "${effectiveTopic}".\nDepth reached: ${ls.currentDepth} / ${maxDepth}\nFindings: ${ls.accumulatedFindings.length}\nDirections explored: ${ls.completedDirections.length}\nReport: ${reportPath}`,
+          reportPath,
+          depthReached: ls.currentDepth,
+          findingsCount: ls.accumulatedFindings.length,
+        },
       }
     } catch (error) {
       await writeRuntimeState(workDir, {
@@ -672,10 +682,12 @@ export const MythosTool = buildTool({
         latentState: ls,
       })
       return {
-        success: false,
-        mode: 'inactive',
-        action,
-        message: `Mythos research failed: ${error instanceof Error ? error.message : String(error)}\nWork dir: ${workDir}`,
+        data: {
+          success: false,
+          mode: 'inactive',
+          action,
+          message: `Mythos research failed: ${error instanceof Error ? error.message : String(error)}\nWork dir: ${workDir}`,
+        },
       }
     }
   },

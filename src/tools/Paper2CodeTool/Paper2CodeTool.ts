@@ -137,6 +137,7 @@ async function ensurePythonModule(
   python: string,
   moduleName: string,
   signal: AbortSignal,
+  pipName?: string,
 ): Promise<void> {
   try {
     await runCommand(
@@ -146,17 +147,47 @@ async function ensurePythonModule(
     )
   } catch {
     await runCommand(
-      [python, '-m', 'pip', 'install', moduleName],
+      [python, '-m', 'pip', 'install', pipName ?? moduleName],
       process.cwd(),
       signal,
     )
   }
 }
 
+// (import_name, pip_name) pairs for paper2code Python dependencies.
+// Required deps are always installed; optional deps have graceful fallbacks in fetch_paper.py.
+const PAPER2CODE_REQUIRED_DEPS: Array<[string, string]> = [
+  ['requests', 'requests'],
+  ['yaml', 'pyyaml'],
+]
+
+const PAPER2CODE_OPTIONAL_DEPS: Array<[string, string]> = [
+  ['pymupdf4llm', 'pymupdf4llm'],
+  ['pdfplumber', 'pdfplumber'],
+]
+
 function getVenvPython(venvDir: string): string {
   return process.platform === 'win32'
     ? join(venvDir, 'Scripts', 'python.exe')
     : join(venvDir, 'bin', 'python')
+}
+
+async function installPaper2CodeDeps(
+  pythonPath: string,
+  signal: AbortSignal,
+): Promise<void> {
+  // Install required deps
+  for (const [importName, pipName] of PAPER2CODE_REQUIRED_DEPS) {
+    await ensurePythonModule(pythonPath, importName, signal, pipName)
+  }
+  // Install optional deps (best-effort; scripts handle ImportError gracefully)
+  for (const [importName, pipName] of PAPER2CODE_OPTIONAL_DEPS) {
+    try {
+      await ensurePythonModule(pythonPath, importName, signal, pipName)
+    } catch {
+      // optional — fetch_paper.py falls back to ar5iv HTML
+    }
+  }
 }
 
 async function preparePythonRuntime(
@@ -165,6 +196,7 @@ async function preparePythonRuntime(
 ): Promise<string> {
   try {
     await ensurePythonModule(python, 'requests', signal)
+    await installPaper2CodeDeps(python, signal)
     return python
   } catch {
     const venvDir = resolve(process.cwd(), '.paper2code_venv')
@@ -176,7 +208,7 @@ async function preparePythonRuntime(
       await runCommand([python, '-m', 'venv', venvDir], process.cwd(), signal)
     }
 
-    await ensurePythonModule(venvPython, 'requests', signal)
+    await installPaper2CodeDeps(venvPython, signal)
     return venvPython
   }
 }
