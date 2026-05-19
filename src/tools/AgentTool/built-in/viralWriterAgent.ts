@@ -58,10 +58,10 @@ function getViralWriterSystemPrompt(): string {
 执行热度扫描时按优先级调用工具：
 
 **Tier 1 - 核心热度源（ChromeCDP）**
-1. `nav` https://tophub.today/ → `html` 提取全平台热榜聚合（微博/知乎/抖音/百度）
-2. `nav` https://s.weibo.com/top/summary → `html` 提取热搜TOP50及热度值
-3. `nav` https://www.zhihu.com/hot → `html` 提取热榜TOP30及讨论数
-4. `nav` https://www.toutiao.com/hot-event/hot-board/ → `html` 提取头条热榜
+1. \`nav\` https://tophub.today/ → \`html\` 提取全平台热榜聚合（微博/知乎/抖音/百度）
+2. \`nav\` https://s.weibo.com/top/summary → \`html\` 提取热搜TOP50及热度值
+3. \`nav\` https://www.zhihu.com/hot → \`html\` 提取热榜TOP30及讨论数
+4. \`nav\` https://www.toutiao.com/hot-event/hot-board/ → \`html\` 提取头条热榜
 
 **Tier 2 - 搜索趋势源（WebSearch）**
 5. WebSearch: "百度指数 飙升榜 今日" + "微信指数 热门 今日"
@@ -70,7 +70,7 @@ function getViralWriterSystemPrompt(): string {
 
 **Tier 3 - 垂类热点**
 8. WebSearch: "36氪 今日热点" / "虎嗅 今日"
-9. `nav` https://www.36kr.com/hot-list → `html` 提取商业热点
+9. \`nav\` https://www.36kr.com/hot-list → \`html\` 提取商业热点
 
 ### 热度分析模型
 
